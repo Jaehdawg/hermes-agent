@@ -33,6 +33,7 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
+import { isNativeBotChat, normalizeNativeBotEvents } from './native_bot.js';
 import {
   addMentions,
   buildPollPayload,
@@ -137,6 +138,11 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // which pins the bridge's HTTP handler until the upstream aiohttp timeout
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
+// Muse/Alberta requires the paired native companion's WASA request-encryption
+// path. This is deliberately fixed to loopback: bot traffic must never be
+// redirected by environment/config to an arbitrary remote endpoint.
+const NATIVE_BOT_BASE_URL = 'http://127.0.0.1:3001';
+const NATIVE_BOT_TIMEOUT_MS = 15000;
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
 //     HTTP handlers so a single Baileys socket never has overlapping sends.
@@ -271,6 +277,29 @@ const messageStore = createBoundedMessageStore(512);
 // uncaptioned photo/video/document/voice note can still surface the original
 // file — see createQuotedMediaCache's doc comment in bridge_helpers.js.
 const quotedMediaCache = createQuotedMediaCache(512);
+
+function enqueueInboundEvent(event) {
+  messageQueue.push(event);
+  if (messageQueue.length > MAX_QUEUE_SIZE) messageQueue.shift();
+}
+
+async function nativeBotFetch(route, options = {}) {
+  return fetch(`${NATIVE_BOT_BASE_URL}${route}`, {
+    ...options,
+    signal: AbortSignal.timeout(NATIVE_BOT_TIMEOUT_MS),
+  });
+}
+
+async function drainNativeBotMessages() {
+  try {
+    const response = await nativeBotFetch('/messages');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    for (const event of normalizeNativeBotEvents(await response.json())) enqueueInboundEvent(event);
+  } catch (err) {
+    // A failed companion drain must not block ordinary Baileys intake.
+    console.warn(`[bridge] native Muse companion drain failed: ${err?.message || err}`);
+  }
+}
 
 function normalizePollUpdateOptions(aggregation, pollUpdateMessage, meId) {
   const selected = [];
@@ -832,20 +861,36 @@ app.use((req, res, next) => {
 });
 
 // Poll for new messages (long-poll style)
-app.get('/messages', (req, res) => {
+app.get('/messages', async (req, res) => {
+  await drainNativeBotMessages();
   const msgs = messageQueue.splice(0, messageQueue.length);
   res.json(msgs);
 });
 
 // Send a message
 app.post('/send', async (req, res) => {
-  if (!sock || connectionState !== 'connected') {
-    return res.status(503).json({ error: 'Not connected to WhatsApp' });
-  }
-
   const { chatId, message, replyTo, mentions } = req.body;
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
+  }
+  if (isNativeBotChat(chatId)) {
+    try {
+      const response = await nativeBotFetch('/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId, message }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload?.success) {
+        return res.status(response.status || 502).json({ error: payload?.error || 'Native Muse send failed' });
+      }
+      return res.json({ success: true, messageId: payload.messageId, messageIds: [payload.messageId] });
+    } catch (err) {
+      return res.status(503).json({ error: `Native Muse companion unavailable: ${err?.message || err}` });
+    }
+  }
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
   try {
