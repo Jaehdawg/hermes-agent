@@ -143,6 +143,9 @@ const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000'
 // redirected by environment/config to an arbitrary remote endpoint.
 const NATIVE_BOT_BASE_URL = 'http://127.0.0.1:3001';
 const NATIVE_BOT_TIMEOUT_MS = 15000;
+// Never auto-inject one external agent's output into another agent's turn loop.
+// Native Muse replies must be retrieved through an explicit supervised path.
+const FORWARD_NATIVE_BOT_INBOUND = false;
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
 //     HTTP handlers so a single Baileys socket never has overlapping sends.
@@ -291,6 +294,7 @@ async function nativeBotFetch(route, options = {}) {
 }
 
 async function drainNativeBotMessages() {
+  if (!FORWARD_NATIVE_BOT_INBOUND) return;
   try {
     const response = await nativeBotFetch('/messages');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
