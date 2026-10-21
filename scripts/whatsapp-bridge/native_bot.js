@@ -4,6 +4,19 @@ export function isNativeBotChat(chatId) {
   return typeof chatId === 'string' && chatId.endsWith(BOT_SUFFIX);
 }
 
+/**
+ * Terminal acknowledgements add no actionable state. Forwarding them to the
+ * agent loop causes reciprocal "confirmed" / reaction ping-pong.
+ */
+export function isTerminalAcknowledgement(text) {
+  if (typeof text !== 'string') return false;
+  const normalized = text.trim().toLowerCase().replace(/[.!]+$/g, '');
+  return new Set([
+    '👍', '✅', '👌', 'ack', 'acknowledged', 'confirmed', 'got it',
+    'all set', 'no action needed', 'understood', 'thanks', 'thank you',
+  ]).has(normalized);
+}
+
 /** Normalize the narrow, verified native Muse companion event shape. */
 export function normalizeNativeBotEvents(payload) {
   if (!Array.isArray(payload)) return [];

@@ -33,7 +33,7 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
-import { isNativeBotChat, normalizeNativeBotEvents } from './native_bot.js';
+import { isNativeBotChat, isTerminalAcknowledgement, normalizeNativeBotEvents } from './native_bot.js';
 import {
   addMentions,
   buildPollPayload,
@@ -302,6 +302,10 @@ async function drainNativeBotMessages() {
     const response = await nativeBotFetch('/messages');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     for (const event of normalizeNativeBotEvents(await response.json())) {
+      if (isTerminalAcknowledgement(event.body)) {
+        console.log(`[bridge] native Muse terminal acknowledgement held: ${event.chatId}`);
+        continue;
+      }
       const state = nativeBotLoopState.get(event.chatId) || { sends: [] };
       state.lastInbound = event.body.trim();
       nativeBotLoopState.set(event.chatId, state);
