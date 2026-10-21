@@ -32,9 +32,10 @@ export function isTerminalAcknowledgement(text) {
     'all set', 'no action needed', 'understood', 'thanks', 'thank you',
   ]);
   if (exact.has(normalized)) return true;
+  if (/^[a-z0-9]+(?:_[a-z0-9]+)*_ack$/.test(normalized)) return true;
   // These phrases are the non-actionable correction/confirmation pattern that
   // caused the observed peer loop. Keep task results, questions, and blockers.
-  return /^(correction accepted and recorded|agreed(?:\s|—|-|$)|exactly(?:\s|—|-|$)|acknowledged(?:\s|—|-|$)|standing by for your correction)/.test(normalized);
+  return /^(receipt confirmed|correction accepted and recorded|agreed(?:\s|—|-|$)|exactly(?:\s|—|-|$)|acknowledged(?:\s|—|-|$)|standing by for your correction)/.test(normalized);
 }
 
 /** Normalize the narrow, verified native Muse companion event shape. */

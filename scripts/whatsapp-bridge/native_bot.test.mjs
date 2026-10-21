@@ -10,6 +10,8 @@ assert.equal(isPeerAgentChat('16508702892@s.whatsapp.net'), true);
 assert.equal(isPeerAgentChat('15551234567@s.whatsapp.net'), false);
 assert.equal(isTerminalAcknowledgement('Correction accepted and recorded. My prior brief was stale.'), true);
 assert.equal(isTerminalAcknowledgement('Agreed — I will verify live state first.'), true);
+assert.equal(isTerminalAcknowledgement('ALBERTA_RECEIPT_ACK'), true);
+assert.equal(isTerminalAcknowledgement('Receipt confirmed.'), true);
 assert.equal(isTerminalAcknowledgement('All set.'), true);
 assert.equal(isTerminalAcknowledgement('👍'), true);
 assert.equal(isTerminalAcknowledgement('All set — task result: completed'), false);
