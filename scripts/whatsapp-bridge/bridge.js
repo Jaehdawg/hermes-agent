@@ -296,8 +296,10 @@ async function nativeBotFetch(route, options = {}) {
   });
 }
 
+let nativeBotDrainInFlight = false;
 async function drainNativeBotMessages() {
-  if (!FORWARD_NATIVE_BOT_INBOUND) return;
+  if (!FORWARD_NATIVE_BOT_INBOUND || nativeBotDrainInFlight) return;
+  nativeBotDrainInFlight = true;
   try {
     const response = await nativeBotFetch('/messages');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -314,8 +316,14 @@ async function drainNativeBotMessages() {
   } catch (err) {
     // A failed companion drain must not block ordinary Baileys intake.
     console.warn(`[bridge] native Muse companion drain failed: ${err?.message || err}`);
+  } finally {
+    nativeBotDrainInFlight = false;
   }
 }
+
+// Native companion messages are consumed on read, so poll from one serialized
+// owner instead of relying on a gateway client's incidental /messages request.
+setInterval(() => { void drainNativeBotMessages(); }, 2000).unref();
 
 function normalizePollUpdateOptions(aggregation, pollUpdateMessage, meId) {
   const selected = [];
