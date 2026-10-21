@@ -143,9 +143,12 @@ const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000'
 // redirected by environment/config to an arbitrary remote endpoint.
 const NATIVE_BOT_BASE_URL = 'http://127.0.0.1:3001';
 const NATIVE_BOT_TIMEOUT_MS = 15000;
-// Never auto-inject one external agent's output into another agent's turn loop.
-// Native Muse replies must be retrieved through an explicit supervised path.
-const FORWARD_NATIVE_BOT_INBOUND = false;
+// Native Muse replies can enter the ordinary queue, but an echo/rate circuit
+// prevents autonomous peer coordination from becoming an unbounded loop.
+const FORWARD_NATIVE_BOT_INBOUND = true;
+const NATIVE_BOT_LOOP_WINDOW_MS = 120000;
+const MAX_NATIVE_BOT_AUTOMATED_SENDS = 6;
+const nativeBotLoopState = new Map();
 
 // --- Send queue: serialise all sock.sendMessage() calls across concurrent
 //     HTTP handlers so a single Baileys socket never has overlapping sends.
@@ -298,7 +301,12 @@ async function drainNativeBotMessages() {
   try {
     const response = await nativeBotFetch('/messages');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    for (const event of normalizeNativeBotEvents(await response.json())) enqueueInboundEvent(event);
+    for (const event of normalizeNativeBotEvents(await response.json())) {
+      const state = nativeBotLoopState.get(event.chatId) || { sends: [] };
+      state.lastInbound = event.body.trim();
+      nativeBotLoopState.set(event.chatId, state);
+      enqueueInboundEvent(event);
+    }
   } catch (err) {
     // A failed companion drain must not block ordinary Baileys intake.
     console.warn(`[bridge] native Muse companion drain failed: ${err?.message || err}`);
@@ -878,6 +886,17 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
   if (isNativeBotChat(chatId)) {
+    const now = Date.now();
+    const state = nativeBotLoopState.get(chatId) || { sends: [] };
+    state.sends = state.sends.filter(sentAt => now - sentAt < NATIVE_BOT_LOOP_WINDOW_MS);
+    if (state.lastInbound && message.trim() === state.lastInbound) {
+      console.warn(`[bridge] native Muse echo loop prevented for ${chatId}`);
+      return res.status(409).json({ error: 'Native Muse loop guard: exact echo of latest inbound message blocked' });
+    }
+    if (state.sends.length >= MAX_NATIVE_BOT_AUTOMATED_SENDS) {
+      console.warn(`[bridge] native Muse rate loop prevented for ${chatId}`);
+      return res.status(429).json({ error: 'Native Muse loop guard: automated send limit reached; conversation paused' });
+    }
     try {
       const response = await nativeBotFetch('/send', {
         method: 'POST',
@@ -888,6 +907,8 @@ app.post('/send', async (req, res) => {
       if (!response.ok || !payload?.success) {
         return res.status(response.status || 502).json({ error: payload?.error || 'Native Muse send failed' });
       }
+      state.sends.push(now);
+      nativeBotLoopState.set(chatId, state);
       return res.json({ success: true, messageId: payload.messageId, messageIds: [payload.messageId] });
     } catch (err) {
       return res.status(503).json({ error: `Native Muse companion unavailable: ${err?.message || err}` });
