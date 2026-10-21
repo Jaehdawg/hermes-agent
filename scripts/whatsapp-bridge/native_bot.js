@@ -1,5 +1,21 @@
 const BOT_SUFFIX = '@bot';
 
+// Peer agents have stable outbound routes but WhatsApp can surface inbound
+// replies under a Linked Identity Device (LID). Canonicalize them before the
+// gateway derives a conversation session, keeping one peer context per agent.
+const PEER_AGENT_CHAT_ALIASES = new Map([
+  ['23949492670633@lid', '16508702892@s.whatsapp.net'], // Instinct inbound LID → verified route
+]);
+
+export function canonicalPeerAgentChatId(chatId) {
+  return PEER_AGENT_CHAT_ALIASES.get(chatId) || chatId;
+}
+
+export function isPeerAgentChat(chatId) {
+  const canonical = canonicalPeerAgentChatId(chatId);
+  return canonical === '1807055946647697@bot' || canonical === '16508702892@s.whatsapp.net';
+}
+
 export function isNativeBotChat(chatId) {
   return typeof chatId === 'string' && chatId.endsWith(BOT_SUFFIX);
 }
@@ -11,10 +27,14 @@ export function isNativeBotChat(chatId) {
 export function isTerminalAcknowledgement(text) {
   if (typeof text !== 'string') return false;
   const normalized = text.trim().toLowerCase().replace(/[.!]+$/g, '');
-  return new Set([
+  const exact = new Set([
     '👍', '✅', '👌', 'ack', 'acknowledged', 'confirmed', 'got it',
     'all set', 'no action needed', 'understood', 'thanks', 'thank you',
-  ]).has(normalized);
+  ]);
+  if (exact.has(normalized)) return true;
+  // These phrases are the non-actionable correction/confirmation pattern that
+  // caused the observed peer loop. Keep task results, questions, and blockers.
+  return /^(correction accepted and recorded|agreed(?:\s|—|-|$)|exactly(?:\s|—|-|$)|acknowledged(?:\s|—|-|$)|standing by for your correction)/.test(normalized);
 }
 
 /** Normalize the narrow, verified native Muse companion event shape. */

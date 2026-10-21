@@ -33,7 +33,7 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
-import { isNativeBotChat, isTerminalAcknowledgement, normalizeNativeBotEvents } from './native_bot.js';
+import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, normalizeNativeBotEvents } from './native_bot.js';
 import {
   addMentions,
   buildPollPayload,
@@ -795,6 +795,15 @@ async function startSocket() {
         lookupQuotedMedia: (quotedChatId, quotedMessageId) => quotedMediaCache.get(quotedChatId, quotedMessageId),
       });
       event.fromOwner = fromOwner;
+      const canonicalPeerChatId = canonicalPeerAgentChatId(event.chatId);
+      if (!fromOwner && isPeerAgentChat(event.chatId) && isTerminalAcknowledgement(event.body)) {
+        console.log(`[bridge] peer-agent terminal acknowledgement held: ${canonicalPeerChatId}`);
+        continue;
+      }
+      if (canonicalPeerChatId !== event.chatId) {
+        event.nativeMetadata = { ...(event.nativeMetadata || {}), peerAgentInboundChatId: event.chatId };
+        event.chatId = canonicalPeerChatId;
+      }
 
       // Ignore Hermes' own reply messages in self-chat mode to avoid loops.
       if (msg.key.fromMe && ((REPLY_PREFIX && event.body.startsWith(REPLY_PREFIX)) || recentlySentIds.has(msg.key.id))) {
