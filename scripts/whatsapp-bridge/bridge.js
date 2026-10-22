@@ -35,7 +35,7 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
-import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, normalizeNativeBotEvents } from './native_bot.js';
+import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
 import {
   addMentions,
   buildPollPayload,
@@ -969,6 +969,11 @@ app.post('/send', async (req, res) => {
       if (!response.ok || !payload?.success) {
         return res.status(response.status || 502).json({ error: payload?.error || 'Native Muse send failed' });
       }
+      // Native sends return an ID rather than a Baileys message key. Record it
+      // so the linked-device reflection is classified as our outbound echo,
+      // never as an owner-authored task in a separate Hermes session.
+      const nativeMessageId = nativeBotOutboundMessageId(payload);
+      if (nativeMessageId) rememberSentId(nativeMessageId);
       state.sends.push(now);
       nativeBotLoopState.set(chatId, state);
       return res.json({ success: true, messageId: payload.messageId, messageIds: [payload.messageId] });

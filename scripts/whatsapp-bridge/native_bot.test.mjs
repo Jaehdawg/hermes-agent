@@ -1,8 +1,11 @@
 import { strict as assert } from 'node:assert';
-import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, normalizeNativeBotEvents } from './native_bot.js';
+import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
 
 assert.equal(isNativeBotChat('1807055946647697@bot'), true);
 assert.equal(isNativeBotChat('16508702892@s.whatsapp.net'), false);
+assert.equal(nativeBotOutboundMessageId({ messageId: '3EB0NATIVE' }), '3EB0NATIVE');
+assert.equal(nativeBotOutboundMessageId({ messageId: ' ' }), '');
+assert.equal(nativeBotOutboundMessageId({}), '');
 assert.equal(canonicalPeerAgentChatId('23949492670633@lid'), '16508702892@s.whatsapp.net');
 assert.equal(canonicalPeerAgentChatId('1807055946647697@bot'), '1807055946647697@bot');
 assert.equal(isPeerAgentChat('23949492670633@lid'), true);

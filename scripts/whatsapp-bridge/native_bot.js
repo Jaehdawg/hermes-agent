@@ -20,6 +20,11 @@ export function isNativeBotChat(chatId) {
   return typeof chatId === 'string' && chatId.endsWith(BOT_SUFFIX);
 }
 
+/** Extract the native companion's outbound ID for linked-device echo tracking. */
+export function nativeBotOutboundMessageId(payload) {
+  return typeof payload?.messageId === 'string' && payload.messageId.trim() ? payload.messageId : '';
+}
+
 /**
  * Terminal acknowledgements add no actionable state. Forwarding them to the
  * agent loop causes reciprocal "confirmed" / reaction ping-pong.
