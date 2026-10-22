@@ -969,7 +969,7 @@ app.post('/send', async (req, res) => {
     try {
       const response = await nativeBotFetch('/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-hermes-native-dispatch': 'bridge' },
         body: JSON.stringify({ chatId, message }),
       });
       const payload = await response.json();

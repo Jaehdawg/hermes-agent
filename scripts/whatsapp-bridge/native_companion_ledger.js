@@ -59,6 +59,11 @@ app.post('/events/:messageId/ack', (req, res) => {
   res.status(acknowledged ? 200 : 409).json({ acknowledged });
 });
 app.post('/send', async (req, res) => {
+  // Only the main bridge may dispatch native peer traffic. Direct callers bypass
+  // the bridge's outbound-ID tracker and can reflect as owner messages.
+  if (req.get('x-hermes-native-dispatch') !== 'bridge') {
+    return res.status(403).json({ error: 'Native outbound dispatch must use the main WhatsApp bridge.' });
+  }
   try {
     const response = await fetch(`${adapterBase}/send`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
