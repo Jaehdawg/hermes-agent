@@ -143,7 +143,10 @@ const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000'
 // Muse/Alberta requires the paired native companion's WASA request-encryption
 // path. This is deliberately fixed to loopback: bot traffic must never be
 // redirected by environment/config to an arbitrary remote endpoint.
-const NATIVE_BOT_BASE_URL = 'http://127.0.0.1:3001';
+// Source-controlled durable ledger fronts the opaque/native protocol adapter.
+// The bridge only acknowledges events after relay succeeds, so a crash or
+// Telegram failure cannot silently discard an Alberta reply.
+const NATIVE_BOT_BASE_URL = 'http://127.0.0.1:3002';
 const NATIVE_BOT_TIMEOUT_MS = 15000;
 // Native Muse replies can enter the ordinary queue, but an echo/rate circuit
 // prevents autonomous peer coordination from becoming an unbounded loop.
@@ -323,17 +326,31 @@ async function drainNativeBotMessages() {
   if (!FORWARD_NATIVE_BOT_INBOUND || nativeBotDrainInFlight) return;
   nativeBotDrainInFlight = true;
   try {
-    const response = await nativeBotFetch('/messages');
+    const owner = `bridge-${process.pid}`;
+    const response = await nativeBotFetch(`/events?owner=${encodeURIComponent(owner)}&leaseMs=30000`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     for (const event of normalizeNativeBotEvents(await response.json())) {
+      // Every returned event is leased. A terminal acknowledgement is recorded
+      // but intentionally not relayed or dispatched, so acknowledge it here.
+      let delivered = false;
       if (isTerminalAcknowledgement(event.body)) {
         console.log(`[bridge] native Muse terminal acknowledgement held: ${event.chatId}`);
-        continue;
+        delivered = true;
+      } else {
+        delivered = await relayPeerAgentToTelegram(event);
       }
-      await relayPeerAgentToTelegram(event);
+      if (delivered) {
+        const ack = await nativeBotFetch(`/events/${encodeURIComponent(event.messageId)}/ack`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ owner }),
+        });
+        if (!ack.ok) throw new Error(`event acknowledgement HTTP ${ack.status}`);
+      }
     }
   } catch (err) {
-    // A failed companion drain must not block ordinary Baileys intake.
+    // A failed companion drain must not block ordinary Baileys intake. Leases
+    // expire and the durable ledger offers unacknowledged replies again.
     console.warn(`[bridge] native Muse companion drain failed: ${err?.message || err}`);
   } finally {
     nativeBotDrainInFlight = false;

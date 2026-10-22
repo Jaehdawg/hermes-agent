@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes durable native WhatsApp event ledger
+After=network-online.target hermes-whatsapp-native-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mjaeh/.hermes/hermes-agent/scripts/whatsapp-bridge
+ExecStart=/usr/bin/node /home/mjaeh/.hermes/hermes-agent/scripts/whatsapp-bridge/native_companion_ledger.js --port 3002 --db /home/mjaeh/.hermes/whatsapp-native/events.sqlite
+Environment=NATIVE_PROTOCOL_BASE_URL=http://127.0.0.1:3001
+Environment=NATIVE_PROTOCOL_PULL_MS=2000
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
