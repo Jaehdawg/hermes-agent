@@ -16,6 +16,11 @@ export function isPeerAgentChat(chatId) {
   return canonical === '1807055946647697@bot' || canonical === '16508702892@s.whatsapp.net';
 }
 
+/** Block linked-device reflections of peer-agent sends before owner forwarding. */
+export function isPeerAgentEcho(chatId, alternateChatId) {
+  return isPeerAgentChat(chatId) || isPeerAgentChat(alternateChatId);
+}
+
 export function isNativeBotChat(chatId) {
   return typeof chatId === 'string' && chatId.endsWith(BOT_SUFFIX);
 }

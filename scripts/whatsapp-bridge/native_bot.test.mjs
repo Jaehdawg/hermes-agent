@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
+import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isPeerAgentEcho, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
 
 assert.equal(isNativeBotChat('1807055946647697@bot'), true);
 assert.equal(isNativeBotChat('16508702892@s.whatsapp.net'), false);
@@ -11,6 +11,8 @@ assert.equal(canonicalPeerAgentChatId('1807055946647697@bot'), '1807055946647697
 assert.equal(isPeerAgentChat('23949492670633@lid'), true);
 assert.equal(isPeerAgentChat('16508702892@s.whatsapp.net'), true);
 assert.equal(isPeerAgentChat('15551234567@s.whatsapp.net'), false);
+assert.equal(isPeerAgentEcho('115075276878015@lid', '1807055946647697@bot'), true, 'LID reflection with Alberta alternate route is blocked');
+assert.equal(isPeerAgentEcho('115075276878015@lid', '15551234567@s.whatsapp.net'), false);
 assert.equal(isTerminalAcknowledgement('Correction accepted and recorded. My prior brief was stale.'), true);
 assert.equal(isTerminalAcknowledgement('Agreed — I will verify live state first.'), true);
 assert.equal(isTerminalAcknowledgement('ALBERTA_RECEIPT_ACK'), true);

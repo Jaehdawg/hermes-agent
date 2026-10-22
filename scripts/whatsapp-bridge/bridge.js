@@ -35,7 +35,7 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
-import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
+import { canonicalPeerAgentChatId, isNativeBotChat, isPeerAgentChat, isPeerAgentEcho, isTerminalAcknowledgement, nativeBotOutboundMessageId, normalizeNativeBotEvents } from './native_bot.js';
 import {
   addMentions,
   buildPollPayload,
@@ -654,6 +654,13 @@ async function startSocket() {
         }
 
         if (WHATSAPP_MODE === 'bot') {
+          // Native peer sends can reflect under Matthew's own LID while their
+          // alternate JID retains the peer route. Never let that reflection
+          // enter owner-message forwarding or create a second Hermes session.
+          if (isPeerAgentEcho(chatId, senderAltId)) {
+            emitDebugEvent({ stage: 'ignored', reason: 'peer_agent_outbound_echo', chatId: redactWhatsAppId(chatId) });
+            continue;
+          }
           // Bot mode: separate bot number. fromMe inbound is either
           //   (a) an echo of our own /send (recentlySentIds will catch it), or
           //   (b) a message the owner typed from their own phone using the
