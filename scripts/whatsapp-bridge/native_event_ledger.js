@@ -33,6 +33,8 @@ export class NativeEventLedger {
     this.insert = this.db.prepare(`INSERT OR IGNORE INTO native_events
       (message_id, chat_id, sender, text, event_timestamp, received_at)
       VALUES (?, ?, ?, ?, ?, ?)`);
+    this.recentSemanticQuery = this.db.prepare(`SELECT 1 FROM native_events
+      WHERE chat_id = ? AND text = ? AND received_at >= ? LIMIT 1`);
     this.pendingQuery = this.db.prepare(`SELECT * FROM native_events
       WHERE state = 'pending' ORDER BY received_at ASC LIMIT ?`);
     this.leaseQuery = this.db.prepare(`UPDATE native_events
@@ -50,11 +52,18 @@ export class NativeEventLedger {
     if (!event?.messageId || !event?.chatId || !event?.sender || !event?.text) {
       throw new Error('native event requires messageId, chatId, sender, and text');
     }
+    // The native protocol adapter can emit the same rendered bot response
+    // twice under distinct WhatsApp message IDs. Suppress only an exact peer
+    // and body duplicate in a narrow window; legitimate later repetitions stay.
+    const cutoff = new Date(Date.parse(now) - 15000).toISOString();
+    if (this.recentSemanticQuery.get(event.chatId, event.text, cutoff)) {
+      return { inserted: false, duplicate: 'semantic' };
+    }
     const result = this.insert.run(
       event.messageId, event.chatId, event.sender, event.text,
       event.timestamp || now, now,
     );
-    return { inserted: result.changes === 1 };
+    return { inserted: result.changes === 1, duplicate: result.changes ? null : 'message_id' };
   }
 
   pending(limit = 50) {

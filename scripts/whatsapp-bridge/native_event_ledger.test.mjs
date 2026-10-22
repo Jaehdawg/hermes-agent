@@ -18,6 +18,11 @@ const event = {
 };
 assert.equal(ledger.record(event).inserted, true, 'first receipt must persist');
 assert.equal(ledger.record(event).inserted, false, 'duplicate message IDs must dedupe');
+assert.deepEqual(
+  ledger.record({ ...event, messageId: 'alberta-message-duplicate' }),
+  { inserted: false, duplicate: 'semantic' },
+  'same rendered reply with a second protocol ID must not relay twice',
+);
 
 let pending = ledger.pending();
 assert.equal(pending.length, 1);
