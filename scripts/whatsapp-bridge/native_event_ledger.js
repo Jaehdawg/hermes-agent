@@ -2,11 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
-/**
- * Durable, non-destructive inbox for native WhatsApp events. The WhatsApp
- * protocol adapter records an event before it is exposed to the bridge. A
- * consumer receives a lease and must explicitly acknowledge after delivery.
- */
+/** Durable, non-destructive inbox for native WhatsApp events. */
 export class NativeEventLedger {
   constructor(dbPath) {
     mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -22,21 +18,20 @@ export class NativeEventLedger {
         event_timestamp TEXT NOT NULL,
         received_at TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','leased','acknowledged')),
-        lease_owner TEXT,
-        lease_until TEXT,
-        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_owner TEXT, lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0,
         acknowledged_at TEXT
       );
-      CREATE INDEX IF NOT EXISTS idx_native_events_pending
-        ON native_events(state, received_at);
+      CREATE INDEX IF NOT EXISTS idx_native_events_pending ON native_events(state, received_at);
     `);
     this.insert = this.db.prepare(`INSERT OR IGNORE INTO native_events
-      (message_id, chat_id, sender, text, event_timestamp, received_at)
-      VALUES (?, ?, ?, ?, ?, ?)`);
-    this.recentSemanticQuery = this.db.prepare(`SELECT 1 FROM native_events
-      WHERE chat_id = ? AND text = ? AND received_at >= ? LIMIT 1`);
-    this.pendingQuery = this.db.prepare(`SELECT * FROM native_events
-      WHERE state = 'pending' ORDER BY received_at ASC LIMIT ?`);
+      (message_id, chat_id, sender, text, event_timestamp, received_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    this.recentComparableQuery = this.db.prepare(`SELECT * FROM native_events
+      WHERE chat_id = ? AND state = 'pending' AND received_at >= ? ORDER BY received_at DESC LIMIT 8`);
+    this.promoteCandidate = this.db.prepare(`UPDATE native_events
+      SET sender = ?, text = ?, event_timestamp = ?, received_at = ? WHERE message_id = ? AND state = 'pending'`);
+    this.pendingQuery = this.db.prepare(`SELECT * FROM native_events WHERE state = 'pending' ORDER BY received_at ASC LIMIT ?`);
+    this.deliverableQuery = this.db.prepare(`SELECT * FROM native_events
+      WHERE state = 'pending' AND received_at <= ? ORDER BY received_at ASC LIMIT ?`);
     this.leaseQuery = this.db.prepare(`UPDATE native_events
       SET state = 'leased', lease_owner = ?, lease_until = ?, attempts = attempts + 1
       WHERE message_id = ? AND state = 'pending'`);
@@ -44,41 +39,43 @@ export class NativeEventLedger {
       SET state = 'acknowledged', acknowledged_at = ?, lease_owner = NULL, lease_until = NULL
       WHERE message_id = ? AND state = 'leased' AND lease_owner = ?`);
     this.releaseQuery = this.db.prepare(`UPDATE native_events
-      SET state = 'pending', lease_owner = NULL, lease_until = NULL
-      WHERE state = 'leased' AND lease_until <= ?`);
+      SET state = 'pending', lease_owner = NULL, lease_until = NULL WHERE state = 'leased' AND lease_until <= ?`);
+  }
+
+  static mapRow(row) {
+    return { messageId: row.message_id, chatId: row.chat_id, sender: row.sender, text: row.text,
+      timestamp: row.event_timestamp, receivedAt: row.received_at, state: row.state,
+      leaseOwner: row.lease_owner, leaseUntil: row.lease_until, attempts: row.attempts };
   }
 
   record(event, now = new Date().toISOString()) {
     if (!event?.messageId || !event?.chatId || !event?.sender || !event?.text) {
       throw new Error('native event requires messageId, chatId, sender, and text');
     }
-    // The native protocol adapter can emit the same rendered bot response
-    // twice under distinct WhatsApp message IDs. Suppress only an exact peer
-    // and body duplicate in a narrow window; legitimate later repetitions stay.
-    const cutoff = new Date(Date.parse(now) - 15000).toISOString();
-    if (this.recentSemanticQuery.get(event.chatId, event.text, cutoff)) {
-      return { inserted: false, duplicate: 'semantic' };
+    const text = event.text.trim();
+    // The adapter streams progressively longer prefixes under new IDs. Collapse
+    // compatible pending variants and reset their quiet window, emitting only
+    // the final stable body after no update arrives for the configured delay.
+    const cutoff = new Date(Date.parse(now) - 90000).toISOString();
+    for (const candidate of this.recentComparableQuery.all(event.chatId, cutoff)) {
+      const prior = candidate.text.trim();
+      if (prior.startsWith(text) || text.startsWith(prior)) {
+        const chosen = text.length > prior.length ? text : prior;
+        this.promoteCandidate.run(event.sender, chosen, event.timestamp || now, now, candidate.message_id);
+        return { inserted: false, duplicate: 'progressive' };
+      }
     }
-    const result = this.insert.run(
-      event.messageId, event.chatId, event.sender, event.text,
-      event.timestamp || now, now,
-    );
+    const result = this.insert.run(event.messageId, event.chatId, event.sender, text, event.timestamp || now, now);
     return { inserted: result.changes === 1, duplicate: result.changes ? null : 'message_id' };
   }
 
   pending(limit = 50) {
-    return this.pendingQuery.all(Math.max(1, Math.min(Number(limit) || 50, 100))).map(row => ({
-      messageId: row.message_id,
-      chatId: row.chat_id,
-      sender: row.sender,
-      text: row.text,
-      timestamp: row.event_timestamp,
-      receivedAt: row.received_at,
-      state: row.state,
-      leaseOwner: row.lease_owner,
-      leaseUntil: row.lease_until,
-      attempts: row.attempts,
-    }));
+    return this.pendingQuery.all(Math.max(1, Math.min(Number(limit) || 50, 100))).map(NativeEventLedger.mapRow);
+  }
+
+  deliverable(quietMs = 12000, now = new Date(), limit = 50) {
+    const cutoff = new Date(now.getTime() - quietMs).toISOString();
+    return this.deliverableQuery.all(cutoff, Math.max(1, Math.min(Number(limit) || 50, 100))).map(NativeEventLedger.mapRow);
   }
 
   lease(messageId, owner, leaseMs = 30000, now = new Date()) {
@@ -88,13 +85,7 @@ export class NativeEventLedger {
     return { ok: result.changes === 1, leaseUntil: until };
   }
 
-  ack(messageId, owner, now = new Date().toISOString()) {
-    return this.ackQuery.run(now, messageId, owner).changes === 1;
-  }
-
-  releaseExpired(now = new Date().toISOString()) {
-    return this.releaseQuery.run(now).changes;
-  }
-
+  ack(messageId, owner, now = new Date().toISOString()) { return this.ackQuery.run(now, messageId, owner).changes === 1; }
+  releaseExpired(now = new Date().toISOString()) { return this.releaseQuery.run(now).changes; }
   close() { this.db.close(); }
 }

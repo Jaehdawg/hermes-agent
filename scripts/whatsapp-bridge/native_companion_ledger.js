@@ -14,6 +14,7 @@ const port = Number(arg('port', process.env.NATIVE_LEDGER_PORT || 3002));
 const dbPath = arg('db', process.env.NATIVE_LEDGER_DB || path.join(process.env.HOME, '.hermes', 'whatsapp-native', 'events.sqlite'));
 const adapterBase = process.env.NATIVE_PROTOCOL_BASE_URL || 'http://127.0.0.1:3001';
 const pullIntervalMs = Math.max(500, Number(process.env.NATIVE_PROTOCOL_PULL_MS || 2000));
+const quietMs = Math.max(3000, Number(process.env.NATIVE_EVENT_QUIET_MS || 15000));
 const ledger = new NativeEventLedger(dbPath);
 const app = express();
 app.use(express.json({ limit: '256kb' }));
@@ -46,7 +47,7 @@ app.get('/events', (req, res) => {
   const leaseMs = Math.min(Math.max(Number(req.query.leaseMs) || 30000, 1000), 120000);
   ledger.releaseExpired();
   const events = [];
-  for (const pending of ledger.pending(req.query.limit || 20)) {
+  for (const pending of ledger.deliverable(quietMs, new Date(), req.query.limit || 20)) {
     const lease = ledger.lease(pending.messageId, owner, leaseMs);
     if (lease.ok) events.push({ ...pending, leaseUntil: lease.leaseUntil });
   }
