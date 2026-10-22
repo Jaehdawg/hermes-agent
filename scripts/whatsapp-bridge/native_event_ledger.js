@@ -3,6 +3,16 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
 /** Durable, non-destructive inbox for native WhatsApp events. */
+/** Normalize presentation-only differences before progressive-stream comparison. */
+function normalizeForProgressiveComparison(text) {
+  return String(text || '')
+    .normalize('NFKC')
+    .replace(/[\u200b-\u200f\u2060]/g, '')
+    .replace(/[\*_`#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export class NativeEventLedger {
   constructor(dbPath) {
     mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -57,10 +67,12 @@ export class NativeEventLedger {
     // compatible pending variants and reset their quiet window, emitting only
     // the final stable body after no update arrives for the configured delay.
     const cutoff = new Date(Date.parse(now) - 90000).toISOString();
+    const normalizedText = normalizeForProgressiveComparison(text);
     for (const candidate of this.recentComparableQuery.all(event.chatId, cutoff)) {
       const prior = candidate.text.trim();
-      if (prior.startsWith(text) || text.startsWith(prior)) {
-        const chosen = text.length > prior.length ? text : prior;
+      const normalizedPrior = normalizeForProgressiveComparison(prior);
+      if (normalizedPrior.startsWith(normalizedText) || normalizedText.startsWith(normalizedPrior)) {
+        const chosen = normalizedText.length > normalizedPrior.length ? text : prior;
         this.promoteCandidate.run(event.sender, chosen, event.timestamp || now, now, candidate.message_id);
         return { inserted: false, duplicate: 'progressive' };
       }

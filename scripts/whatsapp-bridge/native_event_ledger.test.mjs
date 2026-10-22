@@ -22,8 +22,8 @@ assert.equal(restarted.pending().length, 0, 'acknowledged event must not redeliv
 // A native bot can emit progressively longer prefixes under different IDs.
 // Coalesce them, wait for a quiet window, then expose exactly the final body.
 const t0 = new Date('2026-10-22T03:00:00.000Z');
-const short = { ...event, messageId: 'stream-1', text: 'Operating brief: tools and', timestamp: t0.toISOString() };
-const long = { ...short, messageId: 'stream-2', text: 'Operating brief: tools and permissions are detailed here.' };
+const short = { ...event, messageId: 'stream-1', text: '## 1) **VERIFIED** now', timestamp: t0.toISOString() };
+const long = { ...short, messageId: 'stream-2', text: '1) *VERIFIED* now with a complete final result.' };
 assert.equal(restarted.record(short, t0.toISOString()).inserted, true);
 assert.deepEqual(restarted.record(long, new Date(t0.getTime() + 1000).toISOString()), { inserted: false, duplicate: 'progressive' });
 assert.equal(restarted.deliverable(12000, new Date(t0.getTime() + 12000)).length, 0, 'quiet window must hold partial stream');
