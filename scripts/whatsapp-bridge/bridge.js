@@ -19,6 +19,8 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
@@ -267,6 +269,26 @@ const logger = pino({ level: 'warn' });
 
 // Message queue for polling
 const messageQueue = [];
+const execFileAsync = promisify(execFile);
+const PEER_AGENT_RELAY_ENABLED = process.env.WHATSAPP_PEER_AGENT_RELAY_ENABLED !== 'false';
+const HERMES_CLI = process.env.HERMES_CLI || '/home/mjaeh/.hermes/hermes-agent/.hermes/bin/hermes';
+
+async function relayPeerAgentToTelegram(event) {
+  if (!PEER_AGENT_RELAY_ENABLED) return false;
+  const name = event.chatId === '1807055946647697@bot' ? 'Alberta / Muse' : 'Instinct';
+  const text = `[${name} via WhatsApp]\n${event.body}`;
+  try {
+    await execFileAsync(HERMES_CLI, ['send', '--to', 'telegram', '--quiet', text], {
+      timeout: 30000,
+      windowsHide: true,
+    });
+    console.log(`[bridge] peer-agent relay delivered to Telegram: ${event.chatId}`);
+    return true;
+  } catch (err) {
+    console.warn(`[bridge] peer-agent relay failed for ${event.chatId}: ${err?.message || err}`);
+    return false;
+  }
+}
 const MAX_QUEUE_SIZE = 100;
 
 // Track recently sent message IDs.  Two purposes:
@@ -308,10 +330,7 @@ async function drainNativeBotMessages() {
         console.log(`[bridge] native Muse terminal acknowledgement held: ${event.chatId}`);
         continue;
       }
-      const state = nativeBotLoopState.get(event.chatId) || { sends: [] };
-      state.lastInbound = event.body.trim();
-      nativeBotLoopState.set(event.chatId, state);
-      enqueueInboundEvent(event);
+      await relayPeerAgentToTelegram(event);
     }
   } catch (err) {
     // A failed companion drain must not block ordinary Baileys intake.
@@ -796,8 +815,13 @@ async function startSocket() {
       });
       event.fromOwner = fromOwner;
       const canonicalPeerChatId = canonicalPeerAgentChatId(event.chatId);
-      if (!fromOwner && isPeerAgentChat(event.chatId) && isTerminalAcknowledgement(event.body)) {
-        console.log(`[bridge] peer-agent terminal acknowledgement held: ${canonicalPeerChatId}`);
+      if (!fromOwner && isPeerAgentChat(event.chatId)) {
+        event.chatId = canonicalPeerChatId;
+        if (isTerminalAcknowledgement(event.body)) {
+          console.log(`[bridge] peer-agent terminal acknowledgement held: ${canonicalPeerChatId}`);
+          continue;
+        }
+        await relayPeerAgentToTelegram(event);
         continue;
       }
       if (canonicalPeerChatId !== event.chatId) {
