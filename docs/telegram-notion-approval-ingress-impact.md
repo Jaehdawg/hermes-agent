@@ -1,0 +1,22 @@
+# #89 Telegram decision ingress prototype — impact review
+
+Pinned source: `11e3c97823da31df27fba1bbab609cc912a5ef75`. **Isolated worktree only. Not installed or enabled.** No gateway config, running process, Telegram, signer key or Notion provider was touched.
+
+## Scope and behavior
+
+- The adapter's existing PTB raw command/text handlers retain their original flow when no callback is registered. There is no env/config/command-menu registration. An explicit in-process `set_notion_decision_ingress(async_callback, sender_id=..., chat_id=...)` on the `coder` adapter is the sole opt-in; disabling means not registering it (or replacing the adapter without registration). No gateway bootstrap calls this method.
+- Once registered, only `/notion_decide approve|deny <proposal_id> <nonce>` with bounded URL-safe opaque tokens is reserved. The adapter consumes **all** `/notion_decide...` attempts (including invalid ones) without routing them to the model. Other commands (`/approve`, `/deny`) and ordinary text retain their existing flow. The command is intentionally not registered in BotFather's menu.
+- A decision callback receives an immutable `TelegramNotionDecision` with action, opaque proposal/nonce, exact positive raw PTB user ID, private chat ID, message ID, update ID and `coder` profile. Raw `update.message` must be the effective message; edit/channel-post variants, forwarding, replies/quotes, topic, bot, sender-chat, business, wrong sender/chat/profile and malformed commands are rejected before callback. Existing adapter authorization is also checked. Failure of callback is swallowed for the model path, not retried or treated as approval. No command/nonce is logged.
+
+## Trust limits / gates before activation
+
+1. This is an *ingress filter*, not cryptographic authentication of an arbitrary Python `Update` object. Only PTB's gateway-owned inbound handler can confer transport trust; a same-UID model terminal can import/call Python code and a gateway callback is not a hard privilege boundary by itself. Review the PTB polling/webhook admission path, route identity, profile isolation and any direct invocation surface before wiring this in a real process. There is no gateway registration or model-facing approval tool in this patch.
+2. Build a separately privileged decision verifier with narrow IPC/key custody inaccessible to the model and a durable single-use `(chat_id, message_id)` and nonce ledger. Bind proposal, exact frozen rendered payload, source revision, target Notion page, expiry, identity and decision; authenticate the service call, reject replay/expiry/changed digest, and audit. This prototype intentionally does not implement a signer, replay persistence or an effect sender.
+3. Before a Notion effect, independently authorize exact owner identity/profile/target and retention, check objections/revocations and source revision, reserve one effect, verify destination mapping and reconcile uncertain provider receipts. Direct Maton write credentials under the model's Unix identity defeat hard separation; the callback alone cannot grant authorization.
+4. Review all ingress/command collisions, transport failures and rollback against a staging gateway with fake payloads before an explicit owner decision for any deployment. No production activation, restart, external message or provider call is authorized by this prototype.
+
+## Tests
+
+Focused adapter tests exercise disabled command/text behavior, real PTB Update deny + edited denial, private acceptance, identity/group/bot/forward/edit/reply/topic/API-shaped negative cases, wrong profile, existing commands and callback failure. Existing Telegram authorization and long-command batching suites are included in regression verification. The real-PTB test must run with `import telegram` *before* pytest starts because `tests/gateway/conftest.py` installs a stub when PTB is not yet imported.
+
+The worktree's `.git` is a pointer into the installed checkout's `.git/worktrees/` directory. GatewayRunner-importing tests trigger `hermes_bootstrap` early-recovery metadata reads there; `tests/home_io_guard.py` correctly blocks these reads as active-home I/O. The runner-dependent group-auth test and bot-auth-bypass suite were attempted but cannot safely run in this isolated worktree under the guard; they are not claimed green. The focused/adapter suites can run without touching that metadata. The scratch test venv's newer pytest-asyncio emits its own unset-loop-scope deprecation warning.

@@ -6463,10 +6463,42 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         await self._cache_replied_media(msg, event)
         return self._apply_telegram_group_observe_attribution(event)
 
+    def set_notion_decision_ingress(self, callback, *, sender_id: int, chat_id: int) -> None:
+        """Explicit local registration only; no model-facing config or env switch.
+
+        Callback: async (TelegramNotionDecision) -> None. The separately protected
+        service owns replay, nonce, payload/target, expiry and effect decisions.
+        """
+        if getattr(self, "_owner_profile", None) != "coder":
+            raise ValueError("Notion decision ingress is restricted to the coder profile")
+        if not callable(callback) or type(sender_id) is not int or sender_id <= 0 or type(chat_id) is not int or chat_id <= 0:
+            raise ValueError("Explicit callback and positive private sender/chat IDs required")
+        self._notion_decision_ingress = (callback, sender_id, chat_id)
+
+    async def _route_notion_decision(self, update, msg) -> bool:
+        """Consume reserved commands before agent intake; deny invalid attempts silently."""
+        registration = getattr(self, "_notion_decision_ingress", None)
+        if not registration or not isinstance(msg.text, str) or not msg.text.startswith("/notion_decide"):
+            return False
+        from plugins.platforms.telegram.approval_ingress import parse_trusted_decision
+        callback, sender_id, chat_id = registration
+        decision = parse_trusted_decision(
+            update, sender_id=sender_id, chat_id=chat_id,
+            profile=getattr(self, "_owner_profile", None))
+        if decision is not None and self._is_user_authorized_from_message(msg):
+            try:
+                await callback(decision)
+            except Exception:
+                # Never replay to the model on service failure; do not log command or nonce.
+                logger.warning("[Telegram] Notion decision callback failed (outcome unknown; no retry)")
+        return True
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text; buffers client-split chunks into one MessageEvent."""
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
+            return
+        if await self._route_notion_decision(update, msg):
             return
         # Auth check first: blocked users must not reach batching, the observed transcript, or the agent.
         if not self._is_user_authorized_from_message(msg):
@@ -6481,6 +6513,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Handle incoming command messages."""
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
+            return
+        if await self._route_notion_decision(update, msg):
             return
         if not self._should_process_message(msg, is_command=True):
             return
