@@ -6477,9 +6477,15 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
 
     async def _route_notion_decision(self, update, msg) -> bool:
         """Consume reserved commands before agent intake; deny invalid attempts silently."""
-        registration = getattr(self, "_notion_decision_ingress", None)
-        if not registration or not isinstance(msg.text, str) or not msg.text.startswith("/notion_decide"):
+        prefix = "/notion_decide"
+        if (not isinstance(msg.text, str) or not msg.text.startswith(prefix)
+                or (msg.text != prefix and msg.text[len(prefix):len(prefix)+1] not in (" ", "@", "\t", "\r", "\n"))):
             return False
+        registration = getattr(self, "_notion_decision_ingress", None)
+        if not registration:
+            # Reserved decision text must not reach the model when this opt-in
+            # callback is absent (including after an adapter reconnect).
+            return True
         from plugins.platforms.telegram.approval_ingress import parse_trusted_decision
         callback, sender_id, chat_id = registration
         decision = parse_trusted_decision(

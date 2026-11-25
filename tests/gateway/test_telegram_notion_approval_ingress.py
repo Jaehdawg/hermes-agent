@@ -39,9 +39,11 @@ def adapter():
 
 
 @pytest.mark.asyncio
-async def test_disabled_command_follows_existing_path():
+async def test_disabled_reserved_command_is_quarantined_before_model_intake():
     a = adapter()
     await a._handle_command(fixture_update(), None)
+    a.handle_message.assert_not_awaited()
+    await a._handle_command(fixture_update(text="/notion_decide_other"), None)
     a.handle_message.assert_awaited_once()
 
 

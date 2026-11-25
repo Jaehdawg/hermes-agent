@@ -1,6 +1,6 @@
 # Telegram decision service protocol (disabled; fake-only demonstration)
 
-This source worktree has **no registration at gateway startup**, no live decision server, no signer, no effect sender, and no Notion call. Existing explicit `set_notion_decision_ingress` callback registration remains an in-process testing seam, **not** an authorization boundary. The adapter consumes reserved `/notion_decide` messages before model intake only if explicitly registered. Invalid reserved commands are consumed too; ordinary messages retain their old path. Do not route any model-origin metadata into the decision interface.
+This source worktree has **no registration at gateway startup**, no live decision server, no signer, no effect sender, and no Notion call. Existing explicit `set_notion_decision_ingress` callback registration remains an in-process testing seam, **not** an authorization boundary. The adapter quarantines reserved `/notion_decide` messages before model intake even when unregistered (including after reconnect); invalid reserved commands are consumed too. Unrelated messages retain their old path. Do not route any model-origin metadata into the decision interface.
 
 ## Wire shape for later separately privileged service
 
