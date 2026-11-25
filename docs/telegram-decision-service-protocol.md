@@ -1,0 +1,25 @@
+# Telegram decision service protocol (disabled; fake-only demonstration)
+
+This source worktree has **no registration at gateway startup**, no live decision server, no signer, no effect sender, and no Notion call. Existing explicit `set_notion_decision_ingress` callback registration remains an in-process testing seam, **not** an authorization boundary. The adapter consumes reserved `/notion_decide` messages before model intake only if explicitly registered. Invalid reserved commands are consumed too; ordinary messages retain their old path. Do not route any model-origin metadata into the decision interface.
+
+## Wire shape for later separately privileged service
+
+`UnixDecisionServiceClient` implements `DecisionService.decide(TelegramNotionDecision)`. AF_UNIX stream, 4-byte network-order unsigned length then compact UTF-8 JSON, version 1, at most 2048 request bytes:
+
+```json
+{"decision":{"action":"approve","chat_id":111,"message_id":57,"nonce":"nonce_123","profile":"coder","proposal_id":"proposal_123","sender_id":111,"update_id":9},"version":1}
+```
+
+The complete decision object has **exactly** these eight fields; it comes from the raw PTB `Update.message` in the gateway handler, not an LLM event or client-supplied origin. `action` is `approve` or `deny`; `proposal_id` and `nonce` are bounded opaque tokens. A positive response is length-framed `{"version":1,"accepted":true}` (at most 256 bytes). Anything else, timeout, wrong peer UID or malformed response fails closed; callback failures never fall back to model intake and are not automatically retried. This is an interface contract, not a deployed or tested server implementation. The service must validate exact schema/types/size and reject extra fields before any state change; the client's own assertions do not replace server-side validation.
+
+**Do not put payload digest, target, due date, owner, or model-provided identity in the request.** The protected service looks up the immutable proposal by `proposal_id`, verifies the nonce, exact rendered/executed payload digest and source revision against its own protected state, checks expiry/revocation and the frozen profile/sender/chat/target, then atomically consumes nonce and `(chat_id,message_id)` (and update ID as appropriate) in a durable replay ledger. It must produce an auditable decision before any effect, and deny/expire/revoke must prevent dispatch. A local reservation before a provider call is `RESERVED`, not `UNKNOWN`; uncertain provider receipts require reconciliation and no blind retries. The tests use a deliberately in-memory fake with no effect; they do not prove durable replay or production acceptance.
+
+## Mandatory deployment prerequisites (not met here)
+
+- Gateway PTB ingress and model terminal must run under **different OS identities or hosts**. A Unix socket callable by the gateway UID is equally callable by the model terminal when they share a UID. Gateway-held HMAC keys in env, files or process memory are not a workaround. `UnixDecisionServiceClient.decide` refuses a configured model UID equal to the actual gateway UID and refuses service UID equal to gateway UID. This client-side check is only a safety tripwire: model UID is configuration and cannot prove isolation.
+- The separate service must run under a third protected UID/host, own a private socket directory and check **server-side** `SO_PEERCRED` against the separately isolated gateway UID on each accepted connection. The client checks the service process UID and socket ownership. Isolation must include files, credentials, process inspection and model-accessible terminal/tools; a model that can reconfigure the gateway, invoke its callbacks or write its binaries can forge ingress even across UIDs.
+- Authorize exact owner Telegram ID, private chat, coder profile, target destination, retention, credential custody and recovery path separately. Verify real owner-visible rendering matches frozen execution payload, audit, durable replay/concurrency, target-side reconciliation and fake-to-live migration in staging. No service bootstrap or live write may be enabled from this patch.
+
+## Fake-only evidence
+
+`tests/gateway/test_telegram_decision_service.py` parses a real PTB JSON update, refuses forwarded/edit/reply/bot-sender shapes, exercises fake digest drift, expiry, nonce/message replay, and checks same-UID refusal without opening a socket. Existing ingress tests cover disabled-by-default command behavior and callback failure. No Unix server, identity split, persistent ledger or external effects are exercised.

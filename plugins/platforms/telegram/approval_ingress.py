@@ -53,6 +53,10 @@ def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Opt
         "quote", "business_connection_id", "message_thread_id",
     )) or getattr(message, "is_topic_message", False):
         return None
+    # PTB retains legacy/unknown Telegram fields in api_kwargs. Fail closed if
+    # an older forward shape was not promoted to a first-class Message field.
+    if any(key.startswith("forward_") for key in (getattr(message, "api_kwargs", None) or {})):
+        return None
     text = getattr(message, "text", None)
     match = _COMMAND.fullmatch(text) if isinstance(text, str) else None
     if not match:
