@@ -297,3 +297,134 @@ async def test_real_ptb_update_and_rejected_edit():
     await a._handle_command(edited, None)
     callback.assert_not_awaited()
     a.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_bootstrap_default_off_scoped_disable_and_replacement():
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin
+    from gateway.notion_decision_bootstrap import DecisionBinding
+    first = adapter()
+    runner = first.gateway_runner
+    runner._wire_notion_decision_adapter = lambda adp: GatewayAdapterLifecycleMixin._wire_notion_decision_adapter(runner, adp)
+    runner.configure_notion_decision_ingress = lambda callback=None, bindings=(): GatewayAdapterLifecycleMixin.configure_notion_decision_ingress(runner, callback, bindings=bindings)
+    runner._profile_adapters = {}
+    runner.adapters = {Platform.TELEGRAM: first}
+    first.gateway_runner = runner
+    callback = AsyncMock()
+    await first._handle_command(fixture_update(), None)
+    first.handle_message.assert_not_awaited()
+    binding = DecisionBinding(bot_profile="coder", profile="coder", sender_id=111, chat_id=111)
+    runner.configure_notion_decision_ingress(callback, bindings=[binding])
+    await first._handle_command(fixture_update(), None)
+    callback.assert_awaited_once()
+    second = adapter()
+    second.gateway_runner = runner
+    runner.adapters[Platform.TELEGRAM] = second
+    runner._wire_notion_decision_adapter(second)
+    callback.reset_mock()
+    await first._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+    await second._handle_command(fixture_update(), None)
+    callback.assert_awaited_once()
+    runner.configure_notion_decision_ingress()  # runtime kill switch
+    callback.reset_mock()
+    await second._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+    second.handle_message.assert_not_awaited()
+    third = adapter()
+    third.gateway_runner = runner
+    runner._wire_notion_decision_adapter(third)
+    assert getattr(third, "_notion_decision_ingress", None) is None
+
+
+def test_bootstrap_rejects_unscoped_and_duplicate_bindings():
+    from gateway.notion_decision_bootstrap import DecisionBinding
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin
+    a = adapter()
+    runner = a.gateway_runner
+    configure = lambda bindings: GatewayAdapterLifecycleMixin.configure_notion_decision_ingress(
+        runner, AsyncMock(), bindings=bindings)
+    with pytest.raises(ValueError):
+        configure([DecisionBinding(bot_profile="coder", profile="coder", sender_id=111, chat_id=222)])
+    binding = DecisionBinding(bot_profile="coder", profile="coder", sender_id=111, chat_id=111)
+    with pytest.raises(ValueError):
+        configure([binding, binding])
+
+
+@pytest.mark.asyncio
+async def test_multiplex_bootstrap_default_and_named_bots_with_exact_cross_route():
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin as Mixin
+    from gateway.notion_decision_bootstrap import DecisionBinding
+    from gateway.profile_routing import ProfileRoute
+    from hermes_constants import get_process_hermes_home
+    primary, named = adapter(), adapter()
+    primary._owner_profile = None
+    named._owner_profile = "research"
+    runner = primary.gateway_runner
+    runner.config = NS(multiplex_profiles=True, profile_routes=[], _runtime_profile_homes=(
+        ("default", get_process_hermes_home()), ("research", "/fake/research"),
+        ("coder", "/fake/coder")))
+    runner.adapters = {Platform.TELEGRAM: primary}
+    runner._profile_adapters = {"research": {Platform.TELEGRAM: named}}
+    runner._profile_name_for_source = lambda source, adapter_profile=None: None
+    primary.gateway_runner = named.gateway_runner = runner
+    runner._wire_notion_decision_adapter = lambda adp: Mixin._wire_notion_decision_adapter(runner, adp)
+    callback = AsyncMock()
+    bindings = [DecisionBinding("default", "default", 111, 111),
+                DecisionBinding("research", "research", 111, 111)]
+    Mixin.configure_notion_decision_ingress(runner, callback, bindings=bindings)
+    await primary._handle_command(fixture_update(), None)
+    await named._handle_command(fixture_update(), None)
+    assert [x.args[0].profile for x in callback.await_args_list] == ["default", "research"]
+    # Broad user-only route is ordinary chat routing, not approval authority.
+    runner.config.profile_routes = [ProfileRoute("broad", "telegram", "coder", user_id="111",
+                                                bot_profile="research")]
+    Mixin.configure_notion_decision_ingress(runner, callback, bindings=[
+        bindings[0], DecisionBinding("research", "coder", 111, 111)])
+    callback.reset_mock()
+    await named._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+    runner.config.profile_routes = [ProfileRoute("exact", "telegram", "coder", user_id="111",
+                                                chat_id="111", bot_profile="research")]
+    runner._profile_name_for_source = lambda source, adapter_profile=None: "coder"
+    runner._wire_notion_decision_adapter(named)
+    await named._handle_command(fixture_update(), None)
+    assert callback.await_args.args[0].profile == "coder"
+    callback.reset_mock()
+    runner.config.profile_routes = [ProfileRoute("other-bot", "telegram", "coder", user_id="111",
+                                                chat_id="111")]
+    await named._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconfiguration_revokes_captured_callback():
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin as Mixin
+    from gateway.notion_decision_bootstrap import DecisionBinding
+    a = adapter()
+    runner = a.gateway_runner
+    runner._wire_notion_decision_adapter = lambda adp: Mixin._wire_notion_decision_adapter(runner, adp)
+    cb = AsyncMock()
+    binding = DecisionBinding("coder", "coder", 111, 111)
+    Mixin.configure_notion_decision_ingress(runner, cb, bindings=[binding])
+    captured = a._notion_decision_ingress[0]
+    Mixin.configure_notion_decision_ingress(runner)
+    await captured(NS(profile="coder"))
+    cb.assert_not_awaited()
+
+
+def test_shared_adapter_wiring_bootstraps_default_off_for_primary_and_secondary():
+    from unittest.mock import MagicMock
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin as Mixin
+    runner = MagicMock()
+    runner.session_store = object()
+    runner._human_delay = None
+    runner._busy_text_mode = "off"
+    runner._busy_text_timing = None
+    transport = MagicMock()
+    transport.platform = Platform.TELEGRAM
+    Mixin._wire_adapter_handlers(runner, transport)
+    runner._wire_notion_decision_adapter.assert_called_once_with(transport)
+    runner._wire_notion_decision_adapter.reset_mock()
+    Mixin._wire_adapter_handlers(runner, transport, message_handler=AsyncMock())
+    runner._wire_notion_decision_adapter.assert_called_once_with(transport)

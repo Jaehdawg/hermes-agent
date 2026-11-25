@@ -6463,12 +6463,15 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         await self._cache_replied_media(msg, event)
         return self._apply_telegram_group_observe_attribution(event)
 
-    def set_notion_decision_ingress(self, callback, *, sender_id: int, chat_id: int) -> None:
+    def set_notion_decision_ingress(self, callback, *, sender_id: Optional[int] = None, chat_id: Optional[int] = None) -> None:
         """Explicit local registration only; no model-facing config or env switch.
 
         Callback: async (TelegramNotionDecision) -> None. The separately protected
         service owns replay, nonce, payload/target, expiry and effect decisions.
         """
+        if callback is None:
+            self._notion_decision_ingress = None
+            return
         if not callable(callback) or type(sender_id) is not int or sender_id <= 0 or type(chat_id) is not int or chat_id <= 0:
             raise ValueError("Explicit callback and positive private sender/chat IDs required")
         self._notion_decision_ingress = (callback, sender_id, chat_id)
