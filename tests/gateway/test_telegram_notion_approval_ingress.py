@@ -428,3 +428,111 @@ def test_shared_adapter_wiring_bootstraps_default_off_for_primary_and_secondary(
     runner._wire_notion_decision_adapter.reset_mock()
     Mixin._wire_adapter_handlers(runner, transport, message_handler=AsyncMock())
     runner._wire_notion_decision_adapter.assert_called_once_with(transport)
+
+
+@pytest.mark.asyncio
+async def test_configured_client_exact_binding_reconnect_and_disable(monkeypatch):
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin as Mixin
+    from plugins.platforms.telegram.decision_service import UnixDecisionServiceClient
+    sent = []
+
+    async def fake_decide(self, decision):
+        sent.append(decision)
+
+    monkeypatch.setattr(UnixDecisionServiceClient, "decide", fake_decide)
+    first = adapter()
+    runner = first.gateway_runner
+    runner._profile_adapters = {}
+    runner.adapters = {Platform.TELEGRAM: first}
+    runner._wire_notion_decision_adapter = lambda adp: Mixin._wire_notion_decision_adapter(runner, adp)
+    runner.configure_notion_decision_ingress = lambda callback=None, bindings=(): Mixin.configure_notion_decision_ingress(runner, callback, bindings=bindings)
+    runner.config.notion_decision_service = {
+        "enabled": True, "socket_path": "/private/decisions.sock", "model_uid": 1000,
+        "service_uid": 1001, "unsafe_same_uid_best_effort": True,
+        "bindings": [{"bot_profile": "coder", "profile": "coder", "sender_id": 111, "chat_id": 111}],
+    }
+    Mixin._configure_notion_decision_service(runner)
+    await first._handle_command(fixture_update(), None)
+    assert len(sent) == 1 and sent[0].profile == "coder"
+    captured = first._notion_decision_ingress[0]
+    runner.config.notion_decision_service["bindings"][0]["bot_profile"] = "other"
+    Mixin._configure_notion_decision_service(runner)
+    assert first._notion_decision_ingress is None
+    await captured(NS(profile="coder"))
+    await first._handle_command(fixture_update(), None)
+    assert len(sent) == 1
+    runner.config.notion_decision_service["bindings"][0]["bot_profile"] = "coder"
+    runner.config.notion_decision_service["bindings"][0]["profile"] = "other"
+    Mixin._configure_notion_decision_service(runner)
+    assert first._notion_decision_ingress is None
+    runner.config.notion_decision_service["bindings"][0]["profile"] = "coder"
+    Mixin._configure_notion_decision_service(runner)
+    await first._handle_command(fixture_update(user_id=222), None)
+    assert len(sent) == 1
+    second = adapter()
+    second.gateway_runner = runner
+    runner.adapters[Platform.TELEGRAM] = second
+    runner._wire_notion_decision_adapter(second)
+    await first._handle_command(fixture_update(), None)
+    assert len(sent) == 1
+    await second._handle_command(fixture_update(), None)
+    assert len(sent) == 2
+    runner.config.notion_decision_service = {"enabled": False}
+    Mixin._configure_notion_decision_service(runner)
+    assert second._notion_decision_ingress is None
+    await second._handle_command(fixture_update(), None)
+    assert len(sent) == 2
+    second.handle_message.assert_not_awaited()
+
+
+def test_gateway_config_yaml_bridge_of_owner_decision_block(tmp_path):
+    from gateway.config_loader import load_yaml_layer
+    from gateway.config import GatewayConfig
+    from gateway.notion_decision_bootstrap import client_from_config
+    import yaml
+    block = {"enabled": True, "socket_path": "/private/decisions.sock",
+             "model_uid": 1000, "service_uid": 1001, "unsafe_same_uid_best_effort": True,
+             "bindings": [{"bot_profile": "coder", "profile": "coder", "sender_id": 111, "chat_id": 111}]}
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({"gateway": {"notion_decision_service": block}}))
+    data = {}
+    load_yaml_layer(tmp_path, data)
+    cfg = GatewayConfig.from_dict(data)
+    client, bindings = client_from_config(cfg.notion_decision_service)
+    assert client.socket_path.as_posix() == "/private/decisions.sock"
+    assert bindings[0].bot_profile == "coder"
+
+
+@pytest.mark.asyncio
+async def test_teardown_revokes_before_awaiting_cleanup():
+    from gateway.run_adapters import GatewayAdapterLifecycleMixin as Mixin
+    from gateway.run_shutdown import GatewayShutdownMixin
+    a = adapter()
+    runner = a.gateway_runner
+    runner.adapters = {Platform.TELEGRAM: a}
+    runner._profile_adapters = {}
+    runner._wire_notion_decision_adapter = lambda adp: Mixin._wire_notion_decision_adapter(runner, adp)
+    runner.configure_notion_decision_ingress = lambda callback=None, bindings=(): Mixin.configure_notion_decision_ingress(runner, callback, bindings=bindings)
+    from gateway.notion_decision_bootstrap import DecisionBinding
+    cb = AsyncMock()
+    runner.configure_notion_decision_ingress(cb, bindings=[DecisionBinding("coder", "coder", 111, 111)])
+    captured = a._notion_decision_ingress[0]
+    runner._restart_requested = False
+    runner._clear_plugin_message_injector = lambda: (_ for _ in ()).throw(RuntimeError("stop marker"))
+    with pytest.raises(RuntimeError, match="stop marker"):
+        await GatewayShutdownMixin._stop_begin_teardown(runner, NS(started_at=0))
+    assert a._notion_decision_ingress is None
+    await captured(NS(profile="coder"))
+    cb.assert_not_awaited()
+
+
+@pytest.mark.parametrize("override", [None, False, "true"])
+def test_config_requires_explicit_boolean_risk_override_when_same_uid(override):
+    from gateway.notion_decision_bootstrap import client_from_config
+    import os
+    cfg = {"enabled": True, "socket_path": "/private/decisions.sock",
+           "model_uid": os.getuid(), "service_uid": os.getuid(),
+           "bindings": [{"bot_profile": "coder", "profile": "coder", "sender_id": 111, "chat_id": 111}]}
+    if override is not None:
+        cfg["unsafe_same_uid_best_effort"] = override
+    with pytest.raises((ValueError, PermissionError)):
+        client_from_config(cfg)

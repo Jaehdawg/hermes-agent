@@ -146,6 +146,18 @@ async def test_same_uid_is_hard_stop_even_when_socket_exists(tmp_path):
         send.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_unsafe_same_uid_override_keeps_socket_checks(tmp_path, caplog):
+    client = UnixDecisionServiceClient(tmp_path / "service.sock", model_uid=os.getuid(),
+                                       service_uid=os.getuid(), unsafe_same_uid_best_effort=True)
+    with patch.object(UnixDecisionServiceClient, "_send") as send:
+        await client.decide(parse(ptb_update()))
+        send.assert_called_once()
+    assert "UNSAFE best-effort" in caplog.text
+    with pytest.raises(FileNotFoundError):
+        client._send(parse(ptb_update()))
+
+
 def test_envelope_is_exact_parser_fields():
     decision = parse(ptb_update())
     assert decision is not None

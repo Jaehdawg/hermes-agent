@@ -2,14 +2,16 @@
 
 A gateway process sharing its Unix UID with a model terminal CANNOT authenticate
 itself to a service using a Unix socket or a locally stored HMAC. The client
-refuses to connect unless explicitly given a distinct model UID. The server
+refuses to connect unless explicitly given a distinct model UID, except for
+an explicit unsafe best-effort operator override. The server
 must independently check SO_PEERCRED for its configured gateway UID; a client
-configuration is not evidence of that check. No gateway bootstrap registers this.
+configuration is not evidence of that check. Registration remains default-off.
 """
 
 import asyncio
 from dataclasses import asdict, dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import socket
@@ -19,6 +21,8 @@ from typing import Protocol
 
 from .approval_ingress import TelegramNotionDecision
 from .card_delivery import CardDeliveryReceipt, encode_card_delivery
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionService(Protocol):
@@ -43,14 +47,19 @@ class UnixDecisionServiceClient:
     model_uid: int
     service_uid: int
     timeout: float = 2.0
+    unsafe_same_uid_best_effort: bool = False
 
     def _require_distinct_uids(self) -> None:
         # Recheck immediately before connection: model and gateway sharing a UID
         # makes the supposed peer-credential boundary forgeable.
         gateway_uid = os.getuid()
-        if (not all(type(uid) is int and uid >= 0 for uid in (self.model_uid, self.service_uid))
-                or gateway_uid in (self.model_uid, self.service_uid)):
+        if not all(type(uid) is int and uid >= 0 for uid in (self.model_uid, self.service_uid)):
+            raise PermissionError("approval requires valid distinct gateway, model and service UIDs")
+        if len({gateway_uid, self.model_uid, self.service_uid}) != 3 and self.unsafe_same_uid_best_effort is not True:
             raise PermissionError("approval requires distinct gateway, model and service UIDs")
+        if len({gateway_uid, self.model_uid, self.service_uid}) != 3:
+            logger.warning("UNSAFE best-effort decision ingress: gateway/model/service UID overlap; "
+                           "same-UID or root model access can forge decisions or bypass this gate")
 
     async def decide(self, decision: TelegramNotionDecision) -> None:
         if not isinstance(decision, TelegramNotionDecision):

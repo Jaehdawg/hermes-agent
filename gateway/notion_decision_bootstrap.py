@@ -1,14 +1,45 @@
-"""Process-local, default-off Telegram decision callback registration.
-
-No sender or decision service is supplied here. A privileged integrator must explicitly
-provide the callback and every bot/target/owner binding; config/env cannot activate it.
-"""
+"""Default-off, owner-configured Telegram decision service registration."""
 from dataclasses import dataclass
 import inspect
 import re
+import os
+from pathlib import Path
 
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+
+
+def client_from_config(raw):
+    """Parse an explicit gateway config block; never infer authority from model metadata."""
+    from plugins.platforms.telegram.decision_service import UnixDecisionServiceClient
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        raise ValueError("decision service must be explicitly enabled")
+    if set(raw) != {"enabled", "socket_path", "model_uid", "service_uid", "bindings", "unsafe_same_uid_best_effort"}:
+        # The risk flag is optional in strict mode.
+        if set(raw) != {"enabled", "socket_path", "model_uid", "service_uid", "bindings"}:
+            raise ValueError("unexpected or missing decision service configuration")
+    path = raw["socket_path"]
+    if not isinstance(path, str) or not path.startswith("/") or len(os.fsencode(path)) >= 104:
+        raise ValueError("absolute, bounded decision socket path required")
+    uid, service_uid = raw["model_uid"], raw["service_uid"]
+    if type(uid) is not int or uid < 0 or type(service_uid) is not int or service_uid < 0:
+        raise ValueError("model_uid and service_uid must be nonnegative integers")
+    risk = raw.get("unsafe_same_uid_best_effort", False)
+    if type(risk) is not bool:
+        raise ValueError("unsafe_same_uid_best_effort must be an explicit boolean")
+    if len({os.getuid(), uid, service_uid}) != 3 and not risk:
+        raise PermissionError("approval requires distinct gateway, model and service UIDs")
+    entries = raw["bindings"]
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("explicit decision bindings required")
+    bindings = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"bot_profile", "profile", "sender_id", "chat_id"}:
+            raise ValueError("exact decision binding fields required")
+        bindings.append(DecisionBinding(**entry))
+    client = UnixDecisionServiceClient(Path(path), uid, service_uid, unsafe_same_uid_best_effort=risk)
+    validate_bindings(client.decide, bindings)
+    return client, tuple(bindings)
 
 
 @dataclass(frozen=True)

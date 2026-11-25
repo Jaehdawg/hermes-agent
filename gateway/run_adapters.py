@@ -1347,6 +1347,23 @@ class GatewayAdapterLifecycleMixin:
             logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
         return connected
 
+    def _configure_notion_decision_service(self) -> None:
+        """Apply owner-controlled gateway config, including disable; never read message metadata."""
+        from gateway.notion_decision_bootstrap import client_from_config
+        raw = getattr(self.config, "notion_decision_service", None)
+        if not isinstance(raw, dict) or raw.get("enabled") is not True:
+            self.configure_notion_decision_ingress()
+            return
+        try:
+            client, bindings = client_from_config(raw)
+        except (ValueError, PermissionError, TypeError) as exc:
+            self.configure_notion_decision_ingress()
+            logger.error("Notion decision service disabled: %s", exc)
+            return
+        if client.unsafe_same_uid_best_effort:
+            logger.warning("UNSAFE best-effort Notion approval ingress enabled; model/root access can bypass or forge decisions")
+        self.configure_notion_decision_ingress(client.decide, bindings=bindings)
+
     def configure_notion_decision_ingress(self, callback=None, *, bindings=()) -> None:
         """Explicit process-local opt-in; None immediately disables every live bot.
 
@@ -1367,7 +1384,8 @@ class GatewayAdapterLifecycleMixin:
         setter = getattr(adapter, "set_notion_decision_ingress", None)
         if not callable(setter):
             return
-        callback, bindings = getattr(self, "_notion_decision_bootstrap", (None, ()))
+        registration = getattr(self, "_notion_decision_bootstrap", (None, ()))
+        callback, bindings = registration
         binding = binding_for_adapter(self, adapter, bindings) if callback else None
         if binding is None:
             setter(None)
@@ -1376,7 +1394,7 @@ class GatewayAdapterLifecycleMixin:
         async def scoped(decision):
             # A captured callback cannot survive disable/reconfiguration or a
             # reconnect replacement; the adapter's route resolver checks registry.
-            if (getattr(self, "_notion_decision_bootstrap", None) != (callback, bindings)
+            if (getattr(self, "_notion_decision_bootstrap", None) is not registration
                     or decision.profile != binding.profile
                     or binding_for_adapter(self, adapter, bindings) != binding):
                 return
