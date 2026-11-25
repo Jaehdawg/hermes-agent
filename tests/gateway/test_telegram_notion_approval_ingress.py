@@ -30,8 +30,11 @@ def adapter():
     instance.platform = Platform.TELEGRAM
     instance.config = PlatformConfig(enabled=True, token="fake", extra={})
     instance._owner_profile = "coder"
+    instance.gateway_runner = NS(config=NS(multiplex_profiles=False, profile_routes=[]),
+                                 adapters={Platform.TELEGRAM: instance})
     instance._should_process_message = lambda *args, **kwargs: True
     instance._is_user_authorized_from_message = lambda msg: True
+    instance._authorization_check = lambda user_id, chat_type, chat_id: True
     instance._ensure_forum_commands = AsyncMock()
     instance._build_triggered_event = AsyncMock(return_value=NS(text="normal"))
     instance.handle_message = AsyncMock()
@@ -113,11 +116,128 @@ async def test_disabled_text_unchanged_and_callback_failure_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_other_profile_cannot_register_or_dispatch():
+@pytest.mark.parametrize("owner", [None, "coder", "alberta"])
+async def test_dedicated_profile_receives_its_own_decision(owner):
     a = adapter()
-    a._owner_profile = "default"
-    with pytest.raises(ValueError):
-        a.set_notion_decision_ingress(AsyncMock(), sender_id=111, chat_id=111)
+    a._owner_profile = owner
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    assert callback.await_args.args[0].profile == (owner or "default")
+
+
+@pytest.mark.asyncio
+async def test_shared_bot_routes_to_target_not_adapter_owner():
+    from gateway.profile_routing import ProfileRoute
+    a = adapter()
+    a._owner_profile = None
+    a.gateway_runner.config = NS(multiplex_profiles=True, profile_routes=[
+        ProfileRoute(name="alberta", platform="telegram", profile="alberta", user_id="111")])
+    from hermes_constants import get_process_hermes_home
+    a.gateway_runner.config._runtime_profile_homes = (("default", get_process_hermes_home()), ("alberta", "/fake/alberta"))
+    from gateway.run import GatewayRunner
+    from types import MethodType
+    a.gateway_runner._profile_name_for_source = MethodType(GatewayRunner._profile_name_for_source, a.gateway_runner)
+    a.gateway_runner.adapters = {Platform.TELEGRAM: a}
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    assert callback.await_args.args[0].profile == "alberta"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routes", [
+    [("a", "coder"), ("b", "alberta")], [("missing", "unserved")],
+])
+async def test_ambiguous_or_unserved_route_is_consumed_without_decision(routes):
+    from gateway.profile_routing import ProfileRoute
+    a = adapter()
+    a._owner_profile = None
+    from hermes_constants import get_process_hermes_home
+    a.gateway_runner.config = NS(multiplex_profiles=True, profile_routes=[
+        ProfileRoute(name=name, platform="telegram", profile=profile, user_id="111")
+        for name, profile in routes],
+        _runtime_profile_homes=(("default", get_process_hermes_home()), ("coder", "/fake/coder"), ("alberta", "/fake/alberta")))
+    a.gateway_runner._profile_name_for_source = lambda source, adapter_profile=None: routes[0][1]
+    a.gateway_runner.adapters = {Platform.TELEGRAM: a}
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+    a.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_gateway_or_multiplex_reservation_fails_closed():
+    a = adapter()
+    a.set_notion_decision_ingress(AsyncMock(), sender_id=111, chat_id=111)
+    a.gateway_runner = None
+    await a._handle_command(fixture_update(), None)
+    a._notion_decision_ingress[0].assert_not_awaited()
+    a.gateway_runner = NS(config=NS(multiplex_profiles=True, profile_routes=[]))
+    await a._handle_command(fixture_update(), None)
+    a._notion_decision_ingress[0].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [None, "coder", "research", "localish-ingestion"])
+async def test_multiplex_no_routes_uses_registered_bot_owner(owner):
+    from hermes_constants import get_process_hermes_home
+    a = adapter()
+    a._owner_profile = owner
+    name = owner or "default"
+    a.gateway_runner.config = NS(multiplex_profiles=True, profile_routes=[], _runtime_profile_homes=(
+        ("default", get_process_hermes_home()), ("coder", "/fake/coder"),
+        ("research", "/fake/research"), ("localish-ingestion", "/fake/localish")))
+    a.gateway_runner.adapters = {Platform.TELEGRAM: a} if owner is None else {}
+    a.gateway_runner._profile_adapters = {owner: {Platform.TELEGRAM: a}} if owner else {}
+    a.gateway_runner._profile_name_for_source = lambda source, adapter_profile=None: None
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    assert callback.await_args.args[0].profile == name
+    callback.reset_mock()
+    a.gateway_runner.adapters = {Platform.TELEGRAM: object()}
+    a.gateway_runner._profile_adapters = {}
+    await a._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()  # stale or unregistered receiving adapter
+
+
+@pytest.mark.asyncio
+async def test_route_is_scoped_to_receiving_bot_and_canonical_mismatch_denied():
+    from hermes_constants import get_process_hermes_home
+    from gateway.profile_routing import ProfileRoute
+    a = adapter()
+    a._owner_profile = "research"
+    a.gateway_runner.config = NS(multiplex_profiles=True, _runtime_profile_homes=(
+        ("default", get_process_hermes_home()), ("research", "/fake/research"),
+        ("coder", "/fake/coder")), profile_routes=[
+            ProfileRoute(name="shared-bot-only", platform="telegram", profile="coder", user_id="111")])
+    a.gateway_runner.adapters = {}
+    a.gateway_runner._profile_adapters = {"research": {Platform.TELEGRAM: a}}
+    a.gateway_runner._profile_name_for_source = lambda source, adapter_profile=None: None
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    assert callback.await_args.args[0].profile == "research"
+    callback.reset_mock()
+    a.gateway_runner.config.profile_routes = [ProfileRoute(
+        name="research-bot", platform="telegram", profile="coder", user_id="111", bot_profile="research")]
+    # An inconsistent gateway resolution cannot grant the selected target.
+    await a._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth", [None, False, "yes"])
+async def test_gateway_authorization_unknown_or_denied_fails_closed(auth):
+    a = adapter()
+    a._authorization_check = None if auth is None else (lambda *args: auth)
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    await a._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
+    a.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

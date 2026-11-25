@@ -23,6 +23,70 @@ class TelegramNotionDecision:
     profile: str
 
 
+def resolve_decision_profile(runner, adapter, source) -> Optional[str]:
+    """Resolve the PTB transport's runtime profile, never a message/model profile hint.
+
+    Use the gateway's route matcher with the receiving bot as a discriminator.
+    An unreserved target or equally specific competing routes cannot authorize a
+    decision, even though ordinary chat routing may choose the first route.
+    """
+    from pathlib import Path
+    from hermes_constants import get_process_hermes_home
+
+    config = getattr(runner, "config", None)
+    if config is None or source.platform.value != "telegram":
+        return None
+    if not getattr(config, "multiplex_profiles", False):
+        if (getattr(runner, "adapters", None) or {}).get(source.platform) is not adapter:
+            return None
+        owner = getattr(adapter, "_owner_profile", None) or "default"
+        return owner if isinstance(owner, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", owner) else None
+    reserved = getattr(config, "_runtime_profile_homes", None)
+    if not reserved:
+        return None
+    try:
+        homes = {name: Path(path).resolve() for name, path in reserved}
+        if len(homes) != len(reserved) or len(set(homes.values())) != len(homes):
+            return None
+        primary = [name for name, path in homes.items() if path == get_process_hermes_home().resolve()]
+        if len(primary) != 1:
+            return None
+        owner = getattr(adapter, "_owner_profile", None) or primary[0]
+        if owner not in homes:
+            return None
+        # Bind the receiving bot to exactly one live gateway adapter registry.
+        # An old adapter after reconnect (or a duplicate bot registration) cannot
+        # turn its retained callback into an approval for the replacement bot.
+        registries = [(primary[0], getattr(runner, "adapters", None) or {})]
+        registries.extend((name, mapping) for name, mapping in (getattr(runner, "_profile_adapters", None) or {}).items())
+        bindings = [name for name, mapping in registries if mapping.get(source.platform) is adapter]
+        if bindings != [owner]:
+            return None
+        matches = [route for route in (getattr(config, "profile_routes", None) or []) if route.matches(
+            source.platform.value, guild_id=getattr(source, "guild_id", None),
+            chat_id=source.chat_id, thread_id=source.thread_id,
+            parent_chat_id=getattr(source, "parent_chat_id", None),
+            adapter_profile=getattr(adapter, "_owner_profile", None), user_id=source.user_id)]
+        if matches:
+            rank = max(route.specificity for route in matches)
+            best = [route for route in matches if route.specificity == rank]
+            if len(best) != 1:
+                return None
+            target = best[0].profile
+        else:
+            target = owner
+        if target not in homes or not isinstance(target, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", target):
+            return None
+        # Cross-check the gateway's canonical resolution, which handles served
+        # profiles and bot scoping independently. Do not use source.profile.
+        canonical = getattr(runner, "_profile_name_for_source", None)
+        if not callable(canonical) or (canonical(source, adapter_profile=getattr(adapter, "_owner_profile", None)) or owner) != target:
+            return None
+        return target
+    except Exception:
+        return None
+
+
 def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Optional[str]) -> Optional[TelegramNotionDecision]:
     """Fail closed on anything except a new, unforwarded private raw PTB message.
 
@@ -35,7 +99,7 @@ def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Opt
     if getattr(update, "edited_message", None) is not None or getattr(update, "channel_post", None) is not None:
         return None
     user, chat = getattr(message, "from_user", None), getattr(message, "chat", None)
-    if user is None or chat is None or profile != "coder":
+    if user is None or chat is None or not isinstance(profile, str) or not profile or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", profile):
         return None
     def exact_positive(value):
         return type(value) is int and value > 0

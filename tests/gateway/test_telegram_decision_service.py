@@ -97,7 +97,8 @@ def test_real_ptb_wrong_actor_and_chat():
     # PTB's own parsed user object is used, never caller-supplied model metadata.
     assert parse_trusted_decision(wrong_actor, sender_id=222, chat_id=111, profile="coder") is None
     assert parse_trusted_decision(wrong_actor, sender_id=111, chat_id=222, profile="coder") is None
-    assert parse_trusted_decision(wrong_actor, sender_id=111, chat_id=111, profile="default") is None
+    assert parse_trusted_decision(wrong_actor, sender_id=111, chat_id=111, profile="default").profile == "default"
+    assert parse_trusted_decision(wrong_actor, sender_id=111, chat_id=111, profile="") is None
 
 
 @pytest.mark.asyncio

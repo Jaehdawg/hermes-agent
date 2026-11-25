@@ -6469,8 +6469,6 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         Callback: async (TelegramNotionDecision) -> None. The separately protected
         service owns replay, nonce, payload/target, expiry and effect decisions.
         """
-        if getattr(self, "_owner_profile", None) != "coder":
-            raise ValueError("Notion decision ingress is restricted to the coder profile")
         if not callable(callback) or type(sender_id) is not int or sender_id <= 0 or type(chat_id) is not int or chat_id <= 0:
             raise ValueError("Explicit callback and positive private sender/chat IDs required")
         self._notion_decision_ingress = (callback, sender_id, chat_id)
@@ -6486,12 +6484,29 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             # Reserved decision text must not reach the model when this opt-in
             # callback is absent (including after an adapter reconnect).
             return True
-        from plugins.platforms.telegram.approval_ingress import parse_trusted_decision
+        from plugins.platforms.telegram.approval_ingress import parse_trusted_decision, resolve_decision_profile
         callback, sender_id, chat_id = registration
-        decision = parse_trusted_decision(
-            update, sender_id=sender_id, chat_id=chat_id,
-            profile=getattr(self, "_owner_profile", None))
-        if decision is not None and self._is_user_authorized_from_message(msg):
+        # Check raw PTB identity and shape before asking the gateway for a route.
+        # The profile in the final envelope is gateway-owned, never supplied by
+        # command text, source metadata, or the model.
+        raw_decision = parse_trusted_decision(update, sender_id=sender_id, chat_id=chat_id, profile="default")
+        if raw_decision is None:
+            return True
+        runner = getattr(self, "gateway_runner", None)
+        try:
+            source = self._source_from_message_for_auth(msg)
+            profile = resolve_decision_profile(runner, self, source)
+        except Exception:
+            return True
+        if profile is None:
+            return True
+        decision = dataclasses.replace(raw_decision, profile=profile)
+        if (source.user_id == str(sender_id)
+                and source.chat_id == str(chat_id) and source.chat_type == "dm"
+                and self._is_sender_authorized(
+                    source.user_id, chat_type=source.chat_type, chat_id=source.chat_id,
+                    thread_id=source.thread_id) is True
+                and self._is_user_authorized_from_message(msg)):
             try:
                 await callback(decision)
             except Exception:
