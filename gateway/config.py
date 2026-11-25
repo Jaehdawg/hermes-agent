@@ -641,6 +641,7 @@ class GatewayConfig:
     # Prune SessionEntry records older than this (a resumed chat gets a fresh session). 0 = off.
     session_store_max_age_days: int = 90
     profile_routes: list = field(default_factory=list)  # gateway/profile_routing.py
+    notion_decision_service: dict = field(default_factory=dict)  # explicit owner opt-in; never model metadata
 
     # Scalar fields serialized verbatim by ``to_dict`` (in output order).
     _SCALAR_DICT_FIELDS = (
@@ -718,6 +719,7 @@ class GatewayConfig:
                 if is_dataclass(r) and not isinstance(r, type) else r
                 for r in self.profile_routes
             ],
+            "notion_decision_service": self.notion_decision_service,
         }
 
     @classmethod
@@ -813,6 +815,7 @@ class GatewayConfig:
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=parse_profile_routes(data.get("profile_routes") or []),
+            notion_decision_service=data.get("notion_decision_service") if isinstance(data.get("notion_decision_service"), dict) else {},
         )
 
     def _extra_choice(self, platform: Optional[Platform], key: str, choices: set, default: str) -> Optional[str]:

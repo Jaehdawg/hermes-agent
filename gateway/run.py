@@ -3501,6 +3501,7 @@ class GatewayRunner(
         self._init_runtime_caches()
         self._init_session_db()
         self._init_registries_and_clocks()
+        self._configure_notion_decision_service()
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
         """AsyncSessionDB for the active profile scope, resolved per access (not in ``__init__``) since

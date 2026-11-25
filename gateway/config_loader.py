@@ -91,6 +91,7 @@ _TOPLEVEL_BRIDGE: tuple = (
     ("multiplex_profiles", "multiplex_profiles", "gwdata", None, None),
     *_presence("room_link_url"),
     ("profile_routes", "profile_routes", "none", lambda v: isinstance(v, list), None),
+    ("notion_decision_service", "notion_decision_service", "none", None, None),
     *_presence("max_concurrent_sessions"),
     ("systemd_watchdog_seconds", "systemd_watchdog_seconds", "nested", None, None),
     ("streaming", "streaming", "dict", None, None),

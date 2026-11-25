@@ -1347,6 +1347,61 @@ class GatewayAdapterLifecycleMixin:
             logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
         return connected
 
+    def _configure_notion_decision_service(self) -> None:
+        """Apply owner-controlled gateway config, including disable; never read message metadata."""
+        from gateway.notion_decision_bootstrap import client_from_config
+        raw = getattr(self.config, "notion_decision_service", None)
+        if not isinstance(raw, dict) or raw.get("enabled") is not True:
+            self.configure_notion_decision_ingress()
+            return
+        try:
+            client, bindings = client_from_config(raw)
+        except (ValueError, PermissionError, TypeError) as exc:
+            self.configure_notion_decision_ingress()
+            logger.error("Notion decision service disabled: %s", exc)
+            return
+        if client.unsafe_same_uid_best_effort:
+            logger.warning("UNSAFE best-effort Notion approval ingress enabled; model/root access can bypass or forge decisions")
+        self.configure_notion_decision_ingress(client.decide, bindings=bindings)
+
+    def configure_notion_decision_ingress(self, callback=None, *, bindings=()) -> None:
+        """Explicit process-local opt-in; None immediately disables every live bot.
+
+        No callback is shipped by the gateway. This method is not a model tool and
+        must only be called by a trusted integrator with a separate verifier.
+        """
+        from gateway.notion_decision_bootstrap import validate_bindings
+        selected = () if callback is None else validate_bindings(callback, bindings)
+        self._notion_decision_bootstrap = (callback, selected)
+        for mapping in (getattr(self, "adapters", None) or {},
+                        *(getattr(self, "_profile_adapters", None) or {}).values()):
+            for adapter in mapping.values():
+                self._wire_notion_decision_adapter(adapter)
+
+    def _wire_notion_decision_adapter(self, adapter) -> None:
+        """Reapply the current opt-in on startup, hot-serve, and reconnect."""
+        from gateway.notion_decision_bootstrap import binding_for_adapter
+        setter = getattr(adapter, "set_notion_decision_ingress", None)
+        if not callable(setter):
+            return
+        registration = getattr(self, "_notion_decision_bootstrap", (None, ()))
+        callback, bindings = registration
+        binding = binding_for_adapter(self, adapter, bindings) if callback else None
+        if binding is None:
+            setter(None)
+            return
+
+        async def scoped(decision):
+            # A captured callback cannot survive disable/reconfiguration or a
+            # reconnect replacement; the adapter's route resolver checks registry.
+            if (getattr(self, "_notion_decision_bootstrap", None) is not registration
+                    or decision.profile != binding.profile
+                    or binding_for_adapter(self, adapter, bindings) != binding):
+                return
+            await callback(decision)
+
+        setter(scoped, sender_id=binding.sender_id, chat_id=binding.chat_id)
+
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,
         busy_session_handler=None, authorization_check=None, platform_event_handler=None,
@@ -1373,6 +1428,7 @@ class GatewayAdapterLifecycleMixin:
             adapter._busy_text_debounce_seconds, adapter._busy_text_hard_cap_seconds = timing
         adapter._human_delay_range_ms = (
             getattr(self, "_human_delay", None) if human_delay is _UNSET else human_delay)
+        self._wire_notion_decision_adapter(adapter)
 
     def _configure_profile_adapter(
         self, adapter: BasePlatformAdapter, profile_name: str, platform: Platform
