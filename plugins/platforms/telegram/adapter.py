@@ -6489,7 +6489,14 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         # Check raw PTB identity and shape before asking the gateway for a route.
         # The profile in the final envelope is gateway-owned, never supplied by
         # command text, source metadata, or the model.
-        raw_decision = parse_trusted_decision(update, sender_id=sender_id, chat_id=chat_id, profile="default")
+        # The receiving PTB bot's initialized identity, not message text or a
+        # caller-provided bot hint, must author the replied-to card.
+        try:
+            bot_id = self._bot.id
+        except (AttributeError, RuntimeError):
+            return True
+        raw_decision = parse_trusted_decision(update, sender_id=sender_id, chat_id=chat_id,
+                                              bot_id=bot_id, profile="default")
         if raw_decision is None:
             return True
         runner = getattr(self, "gateway_runner", None)

@@ -29,7 +29,7 @@ def encode_decision(decision: TelegramNotionDecision) -> bytes:
     """Versioned length-framed observation; never accept a model-supplied digest."""
     if not isinstance(decision, TelegramNotionDecision):
         raise TypeError("A parsed PTB decision is required")
-    data = json.dumps({"version": 1, "decision": asdict(decision)},
+    data = json.dumps({"version": 2, "decision": asdict(decision)},
                       sort_keys=True, separators=(",", ":")).encode()
     if len(data) > 2048:
         raise ValueError("oversize decision")
@@ -80,7 +80,7 @@ class UnixDecisionServiceClient:
             if size > 256:
                 raise ValueError("oversize service response")
             response = json.loads(self._recv_exact(conn, size))
-            if response != {"version": 1, "accepted": True}:
+            if response != {"version": 2, "accepted": True}:
                 raise RuntimeError("decision not accepted by service")
 
     @staticmethod

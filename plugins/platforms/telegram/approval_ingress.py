@@ -5,6 +5,7 @@ live behind a separately protected decision service and verify nonce, frozen pay
 expiry, replay, and effects. Never expose registration through a model-callable tool.
 """
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import re
 from typing import Optional
 
@@ -21,6 +22,8 @@ class TelegramNotionDecision:
     message_id: int
     update_id: int
     profile: str
+    reply_to_message_id: int
+    message_date: int
 
 
 def resolve_decision_profile(runner, adapter, source) -> Optional[str]:
@@ -87,7 +90,8 @@ def resolve_decision_profile(runner, adapter, source) -> Optional[str]:
         return None
 
 
-def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Optional[str]) -> Optional[TelegramNotionDecision]:
+def parse_trusted_decision(update, *, sender_id: int, chat_id: int, bot_id: int,
+                           profile: Optional[str]) -> Optional[TelegramNotionDecision]:
     """Fail closed on anything except a new, unforwarded private raw PTB message.
 
     This is a shape check, not proof that an arbitrary Python caller is Telegram. It
@@ -107,13 +111,14 @@ def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Opt
                                  getattr(message, "message_id", None), getattr(update, "update_id", None))
     if not (exact_positive(uid) and exact_positive(cid) and exact_positive(mid) and exact_positive(update_id)):
         return None
-    if not (type(sender_id) is int and type(chat_id) is int and uid == sender_id and cid == chat_id):
+    if not (type(sender_id) is int and type(chat_id) is int and exact_positive(bot_id)
+            and uid == sender_id and cid == chat_id):
         return None
     if str(getattr(chat, "type", "")).lower() not in ("private", "chattype.private") or getattr(user, "is_bot", True):
         return None
     if any(getattr(message, attr, None) is not None for attr in (
         "forward_origin", "forward_date", "forward_from", "forward_from_chat",
-        "forward_sender_name", "edit_date", "via_bot", "sender_chat", "reply_to_message",
+        "forward_sender_name", "edit_date", "via_bot", "sender_chat",
         "quote", "business_connection_id", "message_thread_id",
     )) or getattr(message, "is_topic_message", False):
         return None
@@ -121,8 +126,24 @@ def parse_trusted_decision(update, *, sender_id: int, chat_id: int, profile: Opt
     # an older forward shape was not promoted to a first-class Message field.
     if any(key.startswith("forward_") for key in (getattr(message, "api_kwargs", None) or {})):
         return None
+    reply = getattr(message, "reply_to_message", None)
+    reply_user, reply_chat = getattr(reply, "from_user", None), getattr(reply, "chat", None)
+    reply_id = getattr(reply, "message_id", None)
+    if (not exact_positive(reply_id) or reply_id >= mid
+            or reply_user is None or getattr(reply_user, "is_bot", None) is not True
+            or getattr(reply_user, "id", None) != bot_id
+            or reply_chat is None or getattr(reply_chat, "id", None) != cid
+            or str(getattr(reply_chat, "type", "")).lower() not in ("private", "chattype.private")):
+        return None
+    date = getattr(message, "date", None)
+    if not isinstance(date, datetime) or date.tzinfo is None or date.utcoffset() is None:
+        return None
+    timestamp = date.astimezone(UTC).timestamp()
+    if not timestamp.is_integer() or timestamp <= 0:
+        return None
     text = getattr(message, "text", None)
     match = _COMMAND.fullmatch(text) if isinstance(text, str) else None
     if not match:
         return None
-    return TelegramNotionDecision(match[1], match[2], match[3], uid, cid, mid, update_id, profile)
+    return TelegramNotionDecision(match[1], match[2], match[3], uid, cid, mid, update_id,
+                                  profile, reply_id, int(timestamp))

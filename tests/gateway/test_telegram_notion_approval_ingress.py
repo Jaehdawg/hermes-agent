@@ -1,5 +1,6 @@
 """No network, signer, provider, or gateway activation in these ingress tests."""
 from types import SimpleNamespace as NS
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 import sys
 
@@ -11,7 +12,9 @@ from telegram import Bot, Update
 
 def fixture_update(text="/notion_decide approve proposal_123 nonce_123", **changes):
     msg = NS(text=text, message_id=42, from_user=NS(id=111, is_bot=False),
-             chat=NS(id=111, type="private"))
+             chat=NS(id=111, type="private"), date=datetime.fromtimestamp(1700000000, UTC),
+             reply_to_message=NS(message_id=41, from_user=NS(id=123456, is_bot=True),
+                                 chat=NS(id=111, type="private")))
     update = NS(message=msg, effective_message=msg, update_id=5)
     for key, value in changes.items():
         if key.startswith("update_"):
@@ -30,6 +33,7 @@ def adapter():
     instance.platform = Platform.TELEGRAM
     instance.config = PlatformConfig(enabled=True, token="fake", extra={})
     instance._owner_profile = "coder"
+    instance._bot = NS(id=123456)
     instance.gateway_runner = NS(config=NS(multiplex_profiles=False, profile_routes=[]),
                                  adapters={Platform.TELEGRAM: instance})
     instance._should_process_message = lambda *args, **kwargs: True
@@ -58,8 +62,21 @@ async def test_enabled_accepts_only_raw_private_decision():
     await a._handle_command(fixture_update(), None)
     decision = callback.await_args.args[0]
     assert (decision.action, decision.proposal_id, decision.nonce, decision.sender_id,
-            decision.chat_id, decision.message_id, decision.update_id, decision.profile) == (
-                "approve", "proposal_123", "nonce_123", 111, 111, 42, 5, "coder")
+            decision.chat_id, decision.message_id, decision.update_id, decision.profile,
+            decision.reply_to_message_id, decision.message_date) == (
+                "approve", "proposal_123", "nonce_123", 111, 111, 42, 5, "coder", 41, 1700000000)
+    a.handle_message.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_missing_or_wrong_receiving_bot_identity_fails_closed():
+    a = adapter()
+    callback = AsyncMock()
+    a.set_notion_decision_ingress(callback, sender_id=111, chat_id=111)
+    a._bot = None
+    await a._handle_command(fixture_update(), None)
+    a._bot = NS(id=999)
+    await a._handle_command(fixture_update(), None)
+    callback.assert_not_awaited()
     a.handle_message.assert_not_awaited()
 
 
@@ -71,7 +88,7 @@ async def test_enabled_accepts_only_raw_private_decision():
     {"edit_date": object()}, {"update_edited_message": object()},
     {"update_message": None}, {"update_effective_message": NS(text="/notion_decide approve proposal_123 nonce_123")},
     {"via_bot": object()}, {"sender_chat": object()},
-    {"reply_to_message": object()}, {"quote": object()},
+    {"reply_to_message": None}, {"reply_to_message": object()}, {"quote": object()},
     {"message_thread_id": 3}, {"is_topic_message": True},
     {"business_connection_id": "biz"},
 ])
@@ -263,13 +280,18 @@ async def test_real_ptb_update_and_rejected_edit():
         "chat": {"id": 111, "type": "private", "first_name": "Owner"},
         "from": {"id": 111, "is_bot": False, "first_name": "Owner"},
         "text": "/notion_decide deny proposal_123 nonce_123",
+        "reply_to_message": {"message_id": 53, "date": 1699999999,
+                             "chat": {"id": 111, "type": "private", "first_name": "Owner"},
+                             "from": {"id": 123456, "is_bot": True, "first_name": "Bot"}},
     }}
     bot = Bot("123456:TESTBOT")
     update = Update.de_json(raw, bot)
     from plugins.platforms.telegram.approval_ingress import parse_trusted_decision
-    assert parse_trusted_decision(update, sender_id=111, chat_id=111, profile="coder") is not None
+    assert parse_trusted_decision(update, sender_id=111, chat_id=111, bot_id=123456, profile="coder") is not None
     await a._handle_command(update, None)
     assert callback.await_args.args[0].action == "deny"
+    assert callback.await_args.args[0].reply_to_message_id == 53
+    assert callback.await_args.args[0].message_date == 1700000000
     callback.reset_mock()
     edited = Update.de_json({"update_id": 10, "edited_message": raw["message"]}, bot)
     await a._handle_command(edited, None)
